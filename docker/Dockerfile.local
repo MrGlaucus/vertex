@@ -5,7 +5,10 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 WORKDIR /app/vertex
 COPY package.json package-lock.json ./
 RUN apk add --no-cache --virtual .vertex-build gcc g++ python3 cmake make npm libc-dev \
-    && npm ci --only=production \
+    && npm install --global npm@9.9.4 \
+    && npm --version \
+    && npm ci --omit=dev \
+    && node -e "const Database = require('better-sqlite3'); const db = new Database(':memory:'); db.prepare('SELECT 1').get(); db.close();" \
     && apk del .vertex-build
 COPY app ./app
 COPY tools ./tools

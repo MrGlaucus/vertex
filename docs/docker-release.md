@@ -50,4 +50,6 @@ git push origin v1.0.0
 
 流程配置参考 [Docker 官方 GitHub Actions 文档](https://docs.docker.com/build/ci/github-actions/multi-platform/)。原有分支推送构建已由本标签流程替换；`.gitlab-ci.yml` 未调整。
 
+基础镜像提供的旧 npm 不支持根目录 v3 锁文件。Dockerfile 在安装依赖前将 npm 固定到兼容 Node 14 的 `9.9.4`，再执行 `npm ci --omit=dev`，并用内存数据库检查 better-sqlite3 原生模块能否加载。
+
 首次运行仍需在 GitHub 配置 Secrets 并推送包含这些修改的标签。当前本地校验不代表已完成 Docker Hub 发布。
