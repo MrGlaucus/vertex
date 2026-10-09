@@ -263,6 +263,31 @@
           :rules="[{ required: true, message: '${label}不可为空! ' }]">
           <a-input size="small" v-model:value="rss.maxSleepTime"/>
         </a-form-item>
+        <a-form-item label="自动辅种" name="autoReseed" extra="优先在持有完整数据的 qBittorrent 上添加，普通下载容量限制不会拦截辅种。">
+          <a-checkbox v-model:checked="rss.autoReseed">启用自动辅种</a-checkbox>
+        </a-form-item>
+        <a-form-item label="仅辅种" name="onlyReseed" extra="没有匹配到已有完整数据时不进行普通下载。">
+          <a-checkbox v-model:checked="rss.onlyReseed">仅辅种</a-checkbox>
+        </a-form-item>
+        <a-form-item v-if="rss.autoReseed || rss.onlyReseed" label="辅种下载器" name="reseedClients">
+          <a-select mode="multiple" v-model:value="rss.reseedClients"><a-select-option v-for="client of downloaders.filter(c => c.type === 'qBittorrent')" :key="client.id" :value="client.id">{{ client.alias }}</a-select-option></a-select>
+        </a-form-item>
+        <a-form-item v-if="rss.autoReseed || rss.onlyReseed" label="辅种策略" name="reseedMode" extra="安全和兼容模式暂停添加后执行校验；校验失败保持暂停，不自动补下载。快速模式仅用于已确认一致的跨站资源。">
+          <a-select v-model:value="rss.reseedMode">
+            <a-select-option value="safe">安全：文件路径及大小匹配，再校验</a-select-option>
+            <a-select-option value="fast">快速：文件路径及大小匹配，跳过校验</a-select-option>
+            <a-select-option value="compatible">兼容：名称及总大小匹配，再校验</a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item v-if="rss.autoReseed || rss.onlyReseed" label="辅种应用选择规则" name="reseedRespectRules" extra="旧任务默认保持原行为，辅种先于普通选择规则；新任务默认要求匹配选择规则。拒绝规则始终优先。">
+          <a-checkbox v-model:checked="rss.reseedRespectRules">要求匹配选择规则</a-checkbox>
+        </a-form-item>
+        <a-form-item v-if="rss.onlyReseed" label="辅种等待（分钟）" name="reseedWaitMinutes" extra="未命中时保留候选，等待原种完成；0 关闭，最多 1440 分钟，每个 RSS 最多 500 条。">
+          <a-input-number :min="0" :max="1440" v-model:value="rss.reseedWaitMinutes" />
+        </a-form-item>
+        <a-form-item label="同优先级规则顺序" name="ruleOrder" extra="旧任务保留原规则文件顺序；新任务可按任务中选择规则的顺序匹配。">
+          <a-select v-model:value="rss.ruleOrder"><a-select-option value="legacy">兼容旧规则顺序</a-select-option><a-select-option value="configured">按任务配置顺序</a-select-option></a-select>
+        </a-form-item>
         <a-form-item
           label="跳过大小相同种子"
           name="skipSameTorrent"
@@ -339,7 +364,7 @@
     <div style="text-align: left; ">
       <a-alert message="注意事项" type="info" >
         <template #description>
-          RSS 试运行仅判断是否符合 RSS 规则，不检测种子免费或 HR 状态。
+          RSS 试运行检查规则分流和当前下载器容量，不预占名额、不检测免费或 HR 状态、不执行辅种或下载。实际添加前会重新检查容量。
           <br>
           RSS 链接: {{ rss.rssUrls[0] }}
         </template>
@@ -421,9 +446,21 @@ export default {
         dataIndex: 'size',
         width: 14
       }, {
+        title: '命中规则',
+        dataIndex: 'matchedRule',
+        width: 28
+      }, {
+        title: '目标下载器',
+        dataIndex: 'downloader',
+        width: 28
+      }, {
+        title: '分配说明',
+        dataIndex: 'routingDetails',
+        width: 60
+      }, {
         title: '结果',
         dataIndex: 'status',
-        width: 28
+        width: 60
       }
     ];
     return {
@@ -441,6 +478,10 @@ export default {
         scrapeFree: false,
         scrapeHr: false,
         autoReseed: false,
+        reseedMode: 'safe',
+        reseedRespectRules: true,
+        reseedWaitMinutes: 120,
+        ruleOrder: 'configured',
         onlyReseed: false,
         maxSleepTime: 600,
         skipSameTorrent: true,
@@ -510,7 +551,7 @@ export default {
     async dryrun () {
       try {
         const res = await this.$api().rss.dryrun({ ...this.rss });
-        this.dryrunResult = res.data;
+        this.dryrunResult = res.data.map(torrent => ({ ...torrent, routingDetails: (torrent.candidates || []).map(c => c.alias + ': ' + (c.reason || '可用')).join('; ') }));
         this.modalVisible = true;
       } catch (e) {
         this.$message().error(e.message);

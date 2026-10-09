@@ -188,7 +188,7 @@ class Site {
     tryCount = 0;
     while (true) {
       try {
-        await global.runningClient[client].addTorrentByTorrentFile(filepath, hash, false, 0, 0, savePath, category, autoTMM);
+        await global.runningClient[client].addTorrentByTorrentFile(filepath, hash, false, 0, 0, savePath, category, autoTMM, false, { size });
         break;
       } catch (e) {
         tryCount += 1;

@@ -15,7 +15,7 @@
       </template>
       <template #bodyCell="{ column, record }">
         <template v-if="column.dataIndex === 'downloader'">
-          <a-select size="small" :allowClear="true" v-model:value="record.client" style="width: 100%;" @change="modifyRssRuleDownloader(record)">
+          <a-select size="small" :allowClear="true" mode="multiple" v-model:value="record.clientArr" style="width: 100%;" @change="modifyRssRuleDownloader(record)">
             <template v-for="downloader of downloaders" :key="downloader.id">
               <a-select-option
                 :value="downloader.id">
@@ -73,10 +73,10 @@
           <a-input size="small" v-model:value="rssRule.savePath"/>
         </a-form-item>
         <a-form-item
-          label="下载器"
-          name="client"
-          extra="添加种子时选择的下载器, 该选项会直接覆盖 RSS 任务的下载器选择">
-          <a-select size="small" :allowClear="true" v-model:value="rssRule.client">
+          label="下载器组"
+          name="clientArr"
+          extra="留空沿用 RSS 下载器；多选时仅在与 RSS 下载器列表的交集内分配，无可用机器不回退。旧单下载器配置保持原行为，编辑组后使用新分流规则。">
+          <a-select size="small" :allowClear="true" mode="multiple" v-model:value="rssRule.clientArr">
             <template v-for="downloader of downloaders" :key="downloader.id">
               <a-select-option
                 :value="downloader.id">
@@ -88,7 +88,7 @@
         <a-form-item
           label="优先级"
           name="priority"
-          extra="优先级最高的规则最先匹配, 留空则按默认顺序">
+          extra="数值越大越先匹配；同优先级按 RSS 任务中选择规则的顺序，仅使用第一条命中规则">
           <a-input size="small" v-model:value="rssRule.priority"/>
         </a-form-item>
         <a-form-item
@@ -180,7 +180,7 @@ export default {
         defaultSortOrder: 'ascend',
         width: 30
       }, {
-        title: '下载器',
+        title: '下载器组',
         dataIndex: 'downloader',
         width: 20
       }, {
@@ -227,6 +227,7 @@ export default {
       },
       rssRule: {},
       defaultRssRule: {
+        clientArr: [],
         conditions: [{
           key: '',
           compareType: '',
@@ -254,7 +255,7 @@ export default {
     async listRssRule () {
       try {
         const res = await this.$api().rssRule.list();
-        this.rssRuleList = res.data;
+        this.rssRuleList = res.data.map(rule => ({ ...rule, clientArr: rule.clientArr || (rule.client ? [rule.client] : []) }));
       } catch (e) {
         this.$message().error(e.message);
       }
@@ -280,10 +281,10 @@ export default {
       }
     },
     modifyClick (row) {
-      this.rssRule = { ...row };
+      this.rssRule = JSON.parse(JSON.stringify(row));
     },
     cloneClick (row) {
-      this.rssRule = { ...row, id: undefined };
+      this.rssRule = { ...JSON.parse(JSON.stringify(row)), id: undefined };
     },
     async deleteRssRule (row) {
       if (row.used) {

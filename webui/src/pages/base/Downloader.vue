@@ -25,6 +25,10 @@
           <a-tag color="success" v-if="record.status">正常</a-tag>
           <a-tag color="error" v-if="!record.status">异常</a-tag>
         </template>
+        <template v-if="column.dataIndex === 'capacity'">
+          <span v-if="record.capacity">{{ record.capacity.count }} / 预占 {{ record.capacity.reserved }}<span v-if="record.capacity.uncertain">（待核实 {{ record.capacity.uncertain }}）</span></span>
+          <span v-else>—</span>
+        </template>
         <template v-if="column.title === '操作'">
           <span>
             <a @click="goto(record)">打开</a>
@@ -239,11 +243,22 @@
             </template>
           </a-input>
         </a-form-item>
+        <a-form-item label="预计空间保护" name="capacityGuard"
+          extra="启用后计入未完成下载与添加预占，并保留最小剩余空间；大小未知或状态过期时拒绝普通下载。共享磁盘的不同下载器仍需分别预留空间。">
+          <a-checkbox v-model:checked="downloader.capacityGuard">启用预计空间保护</a-checkbox>
+        </a-form-item>
+        <a-form-item v-if="downloader.capacityGuard" label="状态有效期（秒）" name="capacityMaxAge"
+          extra="默认 120 秒，建议大于下载器轮询间隔。过期时等待刷新后再分配。">
+          <a-input-number :min="1" v-model:value="downloader.capacityMaxAge" />
+        </a-form-item>
         <a-form-item
           label="最大下载数量"
           name="maxLeechNum"
           extra="最大的下载活动种子数量, 在超过此数量时, 将不会添加种子">
           <a-input size="small" v-model:value="downloader.maxLeechNum"/>
+        </a-form-item>
+        <a-form-item label="总种子数量上限" name="maxTorrentNum" extra="包含下载、做种与尚未确认的添加；辅种也受此限制。留空或 0 不限制。">
+          <a-input-number :min="0" v-model:value="downloader.maxTorrentNum" />
         </a-form-item>
         <a-form-item
           label="自动删种"
@@ -327,6 +342,10 @@ export default {
         title: '状态',
         dataIndex: 'status',
         width: 15
+      }, {
+        title: '下载数 / 添加预占',
+        dataIndex: 'capacity',
+        width: 32
       }, {
         title: '操作',
         width: 28

@@ -30,6 +30,7 @@ import TaskScript from '@/pages/task/Script';
 import GuideRss from '@/pages/guide/Rss';
 import GuideSubsribe from '@/pages/guide/Subscribe';
 
+import ToolBrush from '@/pages/tool/Brush';
 import ToolMikanHistory from '@/pages/tool/MikanHistory';
 import ToolNetworkTest from '@/pages/tool/NetworkTest';
 import ToolMTeamLogin from '@/pages/tool/MTeamLogin';
@@ -386,6 +387,10 @@ const tool = {
   redirect: '/tool/networkTest',
   children: [
     {
+      path: 'brush',
+      component: ToolBrush,
+      meta: { title: '刷流中心' }
+    }, {
       path: 'mikanHistory',
       component: ToolMikanHistory,
       meta: {

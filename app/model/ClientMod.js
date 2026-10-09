@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const Client = require('../common/Client');
+const capacity = require('../libs/capacity');
 
 const util = require('../libs/util');
 class ClientMod {
@@ -40,7 +41,7 @@ class ClientMod {
     const watchList = util.listWatch();
     for (const client of clientList) {
       client.used = !global.ignoreDependCheck && (rssList.some(item => (item.clientArr || [item.client]).indexOf(client.id) !== -1) ||
-        rssList.some(item => item.reseedClients.indexOf(client.id) !== -1) ||
+        rssList.some(item => (item.reseedClients || []).indexOf(client.id) !== -1) ||
         doubanList.some(item => item.client === client.id) ||
         watchList.some(item => item.downloader === client.id));
       client.status = !!(client.enable && global.runningClient[client.id] && global.runningClient[client.id].status && global.runningClient[client.id].maindata);
@@ -49,6 +50,7 @@ class ClientMod {
         client.allTimeDownload = global.runningClient[client.id].maindata.allTimeDownload;
         client.uploadSpeed = global.runningClient[client.id].maindata.uploadSpeed;
         client.downloadSpeed = global.runningClient[client.id].maindata.downloadSpeed;
+        client.capacity = capacity.snapshot(global.runningClient[client.id]);
         client.leechingCount = global.runningClient[client.id].maindata.leechingCount;
         client.seedingCount = global.runningClient[client.id].maindata.seedingCount;
       }

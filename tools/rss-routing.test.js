@@ -1,0 +1,258 @@
+const assert = require('assert').strict;
+const fs = require('fs');
+const vm = require('vm');
+const path = require('path');
+const capacity = require('../app/libs/capacity');
+const routing = require('../app/libs/rss-routing');
+
+let serial = 0;
+function client (options = {}) {
+  return {
+    id: 'test-' + serial++,
+    alias: '测试下载器',
+    status: true,
+    _client: {},
+    maxLeechNum: 0,
+    minFreeSpace: 0,
+    maindata: { torrents: [], leechingCount: 0, freeSpaceOnDisk: 1000 },
+    capacityUpdatedAt: Date.now(),
+    avgUploadSpeed: 0,
+    avgDownloadSpeed: 0,
+    ...options
+  };
+}
+
+function load (file, mocks) {
+  const module = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'), {
+    module,
+    exports: module.exports,
+    global,
+    Buffer,
+    Date,
+    require: name => {
+      if (Object.prototype.hasOwnProperty.call(mocks, name)) return mocks[name];
+      throw new Error('Unexpected dependency: ' + name);
+    }
+  }, { filename: file });
+  return module.exports;
+}
+
+async function main () {
+  const a = client({ maxLeechNum: 1 });
+  const task = { clientArr: [a.id], clientSortBy: 'leechingCount' };
+  const clients = { [a.id]: a };
+  assert.equal(routing.select(task, { size: 100 }, {}, clients).client, a);
+  assert.equal(routing.select(task, { size: 100 }, { clientArr: ['outside'] }, clients).client, undefined);
+  const b = client();
+  clients[b.id] = b;
+  assert.equal(routing.select(task, { size: 100 }, { client: b.id }, clients).client, b, 'legacy override');
+  assert.equal(routing.select(task, { size: 100 }, { clientArr: [b.id] }, clients).client, undefined, 'new groups require task membership');
+  assert.deepEqual(routing.orderedRules([{ id: 'a' }, { id: 'b', priority: 0 }, { id: 'c', priority: 2 }], ['b', 'a', 'c']).map(r => r.id), ['c', 'b', 'a']);
+  const sorting = { ...task, clientArr: [a.id, b.id], clientSortBy: 'freeSpaceOnDisk' };
+  b.maindata.freeSpaceOnDisk = 2000;
+  assert.equal(routing.select(sorting, { size: 100 }, {}, clients).client, b, 'largest free disk first');
+  b.maxDownloadSpeed = 10;
+  b.avgDownloadSpeed = 10;
+  assert.equal(routing.select(sorting, { size: 100 }, { clientArr: [b.id] }, clients).client, undefined, 'unavailable group never falls back');
+  b.maxDownloadSpeed = 0;
+  b.avgDownloadSpeed = 0;
+
+  const r = capacity.reserve(a, 'HASH', 100);
+  assert.throws(() => capacity.reserve(a, 'other', 100), /最大下载数量/);
+  r.accepted();
+  assert.equal(capacity.snapshot(a).count, 1, 'accepted but unseen request retains its slot');
+  a.maindata.torrents = [{ hash: 'hash', size: 100, completed: 10 }];
+  a.maindata.leechingCount = 1;
+  assert.equal(capacity.snapshot(a).reserved, 0, 'observed hash reconciles reservation');
+  assert.equal(capacity.snapshot(a).count, 1, 'no double count');
+
+  const space = client({ _client: { capacityGuard: true }, minFreeSpace: 100 });
+  space.maindata.torrents = [{ hash: 'existing', size: 400, completed: 100 }];
+  assert.equal(capacity.reason(space, 600), '');
+  assert.match(capacity.reason(space, 601), /预计剩余空间不足/);
+  const held = capacity.reserve(space, 'new', 500);
+  assert.match(capacity.reason(space, 101), /预计剩余空间不足/);
+  held.release();
+  assert.equal(capacity.reason(space, 101), '');
+  assert.match(capacity.reason(space, 0), /大小/);
+  space.capacityUpdatedAt = Date.now() - 121000;
+  assert.match(capacity.reason(space, 10), /过期/);
+  const old = client();
+  assert.equal(capacity.reason(old, 0), '', 'space protection is opt-in');
+  const unknown = capacity.reserve(old, 'unknown', 100);
+  unknown.uncertain();
+  assert.match(capacity.reason(old, 100, { hash: 'UNKNOWN' }), /正在添加/);
+  assert.equal(capacity.snapshot({ ...old }).reserved, 1, 'recreated instances share reservations');
+
+  const moment = () => ({ unix: () => 1000 });
+  const logger = { info () {}, debug () {}, error () {} };
+  let release;
+  let requests = 0;
+  const transport = { addTorrent: async () => { requests++; await new Promise(resolve => { release = resolve; }); return { statusCode: 200 }; } };
+  const Client = load('app/common/Client.js', {
+    '../libs/client/qb': transport,
+    '../libs/client/de': {},
+    '../libs/client/tr': {},
+    '../libs/util': { runRecord: async () => { throw new Error('database unavailable'); } },
+    '../libs/redis': {},
+    moment,
+    '../libs/logger': logger,
+    'node-cron': {},
+    './Push': {},
+    '../libs/capacity': capacity,
+    '../libs/brush-recovery': require('../app/libs/brush-recovery'),
+    '../libs/request-limit': require('../app/libs/request-limit'),
+    '../libs/delete-protection': require('../app/libs/delete-protection'),
+    '../libs/brush-store': require('../app/libs/brush-store')
+  });
+  const live = Object.assign(Object.create(Client.prototype), client({ maxLeechNum: 1 }), { client: transport, login () {} });
+  const adding = live.addTorrent('url', 'one', false, 0, 0, '', '', false, false, { size: 100 });
+  await assert.rejects(live.addTorrent('url', 'two', false), /最大下载数量/);
+  release();
+  await adding;
+  assert.equal(requests, 1, 'concurrent admission prevented before HTTP');
+  assert.equal(capacity.snapshot(live).reserved, 1, 'database failure does not undo accepted request');
+
+  const failed = Object.assign(Object.create(Client.prototype), client(), { client: { addTorrent: async () => ({ statusCode: 400 }) }, login () {} });
+  await assert.rejects(failed.addTorrent('url', 'bad', false), /状态码/);
+  assert.equal(capacity.snapshot(failed).reserved, 0, 'explicit rejection releases slot');
+  failed.client.addTorrent = async () => { throw new Error('timeout'); };
+  await assert.rejects(failed.addTorrent('url', 'timeout', false), /timeout/);
+  assert.equal(capacity.snapshot(failed).reserved, 1, 'unknown outcome retains slot');
+  failed.client.addTorrent = async () => ({ statusCode: 500 });
+  await assert.rejects(failed.addTorrent('url', 'server-error', false), /状态码/);
+  assert.equal(capacity.snapshot(failed).reserved, 2, 'server error may occur after request acceptance');
+  const fileClient = Object.assign(Object.create(Client.prototype), client({ maxLeechNum: 1 }), {
+    client: { addTorrentByTorrentFile: async () => ({ statusCode: 204 }), addTorrent: async () => ({ statusCode: 204 }) }
+  });
+  await fileClient.addTorrentByTorrentFile('file', 'file-hash', false, 0, 0, '', '', false, false, { size: 100 });
+  await assert.rejects(fileClient.addTorrent('url', 'other', false), /最大下载数量/);
+  const asyncClient = Object.assign(Object.create(Client.prototype), client(), {
+    client: { addTorrent: async () => ({ statusCode: 202 }), addTorrentByTorrentFile: async () => ({ statusCode: 202 }) }
+  });
+  await asyncClient.addTorrent('url', 'async-url', false, 0, 0, '', '', false, false, { size: 100 });
+  await asyncClient.addTorrentByTorrentFile('file', 'async-file', false, 0, 0, '', '', false, false, { size: 100 });
+  assert.equal(capacity.snapshot(asyncClient).reserved, 2, '202 Accepted retains both URL and file reservations until observed');
+  const asyncJobs = require('../app/libs/brush-store').list('job').filter(job => job.clientId === asyncClient.id);
+  assert.equal(asyncJobs.length, 2);
+  assert.equal(asyncJobs.every(job => job.state === 'accepted'), true, '202 Accepted is queued for reconciliation, not treated as an error');
+  const metadata = client();
+  capacity.reserve(metadata, 'metadata', 100).accepted();
+  metadata.maindata.torrents = [{ hash: 'metadata', size: 0, completed: 0 }];
+  assert.equal(capacity.snapshot(metadata).reserved, 1, 'wait for metadata before releasing reserved disk');
+
+  const RuleMod = load('app/model/RssRuleMod.js', { fs: {}, path: {}, '../libs/util': {} });
+  const ruleMod = new RuleMod();
+  assert.equal(ruleMod.normalize({ client: 'legacy', clientArr: ['legacy'] }).client, 'legacy');
+  assert.equal(ruleMod.normalize({ client: 'legacy', clientArr: ['new'] }).client, undefined);
+  assert.equal(ruleMod.normalize({ client: 'legacy', clientArr: [] }).client, undefined);
+  assert.throws(() => ruleMod.normalize({ clientArr: 'invalid' }), /数组/);
+  assert.throws(() => ruleMod.normalize({ priority: 'invalid' }), /数字/);
+
+  let records = [];
+  const torrent = { name: 'example', size: 100, hash: 'rss-test', link: 'link' };
+  const Rss = load('app/common/Rss.js', {
+    '../libs/rss': { getTorrents: async () => [{ ...torrent }] },
+    '../libs/util': { getRecord: async () => null, runRecord: async (...args) => records.push(args), uuid: { v4: () => 'uuid' } },
+    '../libs/logger': logger,
+    '../libs/redis': {},
+    'node-cron': {},
+    bencode: {},
+    crypto: {},
+    fs: {},
+    path: {},
+    moment,
+    './Push': {},
+    '../libs/rss-routing': routing,
+    '../libs/auto-reseed': { attempt: async () => false, waiting: () => [] },
+    '../libs/brush-recovery': require('../app/libs/brush-recovery'),
+    '../libs/brush-store': require('../app/libs/brush-store')
+  });
+  const savedClients = global.runningClient;
+  try {
+    global.runningClient = clients;
+    const rss = Object.assign(Object.create(Rss.prototype), task, {
+      _rss: {},
+      urls: ['rss'],
+      id: 'task',
+      acceptRules: [{ id: 'route', alias: '指定机器', clientArr: [b.id] }],
+      rejectRules: [],
+      addCount: 0,
+      addCountPerHour: 20,
+      lastRssTime: 1000,
+      maxSleepTime: 120,
+      ntf: { rejectTorrent: async () => {} },
+      _fitRule: () => true
+    });
+    let pushed = false;
+    rss._pushTorrent = async () => { pushed = true; };
+    await rss.rss([torrent]);
+    assert.equal(pushed, false, 'actual RSS execution does not fall back outside rule group');
+    assert.match(records[0][1][7], /不回退/);
+    rss.clientArr = [a.id, b.id];
+    const preview = await rss.dryrun();
+    assert.equal(preview[0].downloader, b.alias);
+    assert.equal(preview[0].matchedRule, '指定机器');
+    records = [];
+    await rss.rss([torrent]);
+    assert.equal(pushed, true);
+    rss.rejectRules = [{ alias: '拒绝' }];
+    pushed = false;
+    await rss.rss([torrent]);
+    assert.equal(pushed, false, 'reject rules take precedence');
+    rss.rejectRules = [];
+    let sent;
+    b.addTorrent = async (...args) => { sent = args; };
+    rss.ntf.addTorrent = async () => {};
+    await Rss.prototype._pushTorrent.call(rss, { ...torrent, url: 'download-url' }, b, { savePath: '/rule', category: 'rule-category' });
+    assert.equal(sent[0], 'download-url');
+    assert.equal(sent[5], '/rule');
+    assert.equal(sent[6], 'rule-category');
+    assert.equal(sent[9].size, 100);
+    sent = undefined;
+    rss._downloadTorrent = async () => ({ filepath: 'torrent-file', hash: 'real-hash', size: 110 });
+    b.addTorrentByTorrentFile = async (...args) => { sent = args; };
+    await Rss.prototype._pushTorrent.call(rss, { ...torrent, hash: 'fakehash-123', url: 'url' }, b, {});
+    assert.equal(sent[1], 'real-hash', 'synthetic RSS hashes must resolve before reserving');
+    assert.equal(sent[9].size, 110, 'file metadata size used for final admission');
+    let finish;
+    let runs = 0;
+    rss._runRss = async () => { runs++; await new Promise(resolve => { finish = resolve; }); };
+    const run = rss.rss([]);
+    await rss.rss([]);
+    assert.equal(runs, 1, 'overlapping ticks are skipped');
+    finish();
+    await run;
+    rss.stopped = true;
+    await rss.rss([]);
+    assert.equal(runs, 1, 'disabled tasks do not start new work');
+  } finally {
+    global.runningClient = savedClients;
+  }
+  let apiVersion;
+  let qbRequest;
+  const qb = load('app/libs/client/qb.js', {
+    '../util': {
+      requestPromise: async request => {
+        if (request.url.endsWith('webapiVersion')) return { statusCode: apiVersion ? 200 : 503, body: apiVersion || '' };
+        qbRequest = request;
+        return { statusCode: 200, body: 'Ok.' };
+      }
+    },
+    '../logger': { debug: () => {}, error: () => {} },
+    url: require('url'),
+    fs: { createReadStream: () => 'torrent-stream' }
+  });
+  await assert.rejects(qb.addTorrentByTorrentFile('qb', 'cookie', 'file', false, 0, 0, '/data', '', false, false, true), /拒绝添加暂停任务/);
+  assert.equal(qbRequest, undefined, 'unknown API version must never send a potentially unpaused reseed');
+  apiVersion = '2.11.0';
+  await qb.addTorrentByTorrentFile('qb-new', 'cookie', 'file', false, 0, 0, '/data', '', false, false, true);
+  assert.equal(qbRequest.formData.stopped, 'true');
+  apiVersion = '2.9.3';
+  await qb.addTorrentByTorrentFile('qb-old', 'cookie', 'file', false, 0, 0, '/data', '', false, false, true);
+  assert.equal(qbRequest.formData.paused, 'true');
+  console.log('RSS routing, capacity and Client integration tests passed');
+}
+
+main().catch(error => { console.error(error); process.exitCode = 1; });

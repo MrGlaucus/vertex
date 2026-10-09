@@ -21,6 +21,10 @@ class UserMod {
         path: '/index',
         icon: ['fas', 'house-user']
       }, {
+        title: '刷流中心',
+        path: '/tool/brush',
+        icon: ['fas', 'chart-line']
+      }, {
         title: '数据监控',
         path: '/metric',
         icon: ['fas', 'chart-line'],

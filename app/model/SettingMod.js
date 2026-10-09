@@ -168,27 +168,17 @@ class SettingMod {
   };
 
   async backupVertex (options) {
-    const backupsFile = `/tmp/Vertex-backups-${moment().format('YYYY-MM-DD_HH:mm:ss')}.tar.gz`;
-    const backupsFileds = ['vertex/db', 'vertex/data', 'vertex/config'];
-    if (options.bt + '' === 'true') {
-      backupsFileds.push('vertex/torrents');
-    }
-    await util.tar.c({
-      gzip: true,
-      file: backupsFile,
-      cwd: global.dataPath
-    }, backupsFileds);
-    return backupsFile;
+    return require('../libs/backup-safe').create(path.resolve(global.dataPath || '/', 'vertex'), util.backupDatabase, options.bt + '' === 'true');
   }
 
   async restoreVertex (options) {
-    const backupsFile = options.file.path || options.file.originalFilename;
-    await util.tar.x({
-      gzip: true,
-      file: backupsFile,
-      C: '/tmp'
-    });
-    return '数据导入成功, 重启容器后生效。';
+    if (!options.file || !options.file.path) throw new Error('请上传恢复包');
+    const file = options.file.path;
+    try {
+      return await require('../libs/backup-safe').stageRestore(file, path.resolve(global.dataPath || '/', 'vertex'), util.checkDatabase);
+    } finally {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
   }
 
   async networkTest (options) {

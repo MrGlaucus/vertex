@@ -3,10 +3,17 @@ const path = require('path');
 const Rss = require('../common/Rss');
 
 const util = require('../libs/util');
+function validate (rssSet) {
+  if (rssSet.reseedMode && !['safe', 'fast', 'compatible'].includes(rssSet.reseedMode)) throw new Error('未知辅种策略');
+  if (rssSet.ruleOrder && !['legacy', 'configured'].includes(rssSet.ruleOrder)) throw new Error('未知规则顺序');
+  if (rssSet.reseedWaitMinutes !== undefined && (!Number.isFinite(Number(rssSet.reseedWaitMinutes)) || +rssSet.reseedWaitMinutes < 0 || +rssSet.reseedWaitMinutes > 1440)) throw new Error('辅种等待时间应在 0 到 1440 分钟之间');
+}
+
 class RssMod {
   add (options) {
     const id = util.uuid.v4().split('-')[0];
     const rssSet = { ...options };
+    validate(rssSet);
     rssSet.id = id;
     fs.writeFileSync(path.join(__dirname, '../data/rss/', id + '.json'), JSON.stringify(rssSet, null, 2));
     if (global.runningRss[id]) global.runningRss[id].destroy();
@@ -27,8 +34,9 @@ class RssMod {
 
   modify (options) {
     const rssSet = { ...options };
+    validate(rssSet);
     rssSet.sameServerClients = rssSet.sameServerClients || [];
-    rssSet.reseedClients = rssSet.reseedClients || [];
+    rssSet.reseedClients = rssSet.reseedClients || rssSet.clientArr || [rssSet.client];
     fs.writeFileSync(path.join(__dirname, '../data/rss/', options.id + '.json'), JSON.stringify(rssSet, null, 2));
     if (global.runningRss[options.id]) global.runningRss[options.id].destroy();
     if (rssSet.enable) global.runningRss[options.id] = new Rss(rssSet);
@@ -42,6 +50,9 @@ class RssMod {
         rss.clientArr = [rss.client];
         delete rss.client;
       }
+      rss.reseedMode = rss.reseedMode || 'compatible';
+      rss.ruleOrder = rss.ruleOrder || 'legacy';
+      rss.reseedClients = rss.reseedClients || rss.clientArr || [rss.client];
       rss.acceptRules = rss.acceptRules || [];
       rss.rejectRules = rss.rejectRules || [];
     }

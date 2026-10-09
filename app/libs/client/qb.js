@@ -42,6 +42,7 @@ exports.getApiVersion = async function (clientUrl, cookie) {
   };
   const res = await util.requestPromise(message);
   logger.debug(clientUrl, 'WebAPI version:', res.body);
+  if (res.statusCode !== 200 || !/^\d+(\.\d+)+$/.test(String(res.body).trim())) throw new Error('无法确认 qBittorrent WebAPI 版本');
   return res.body;
 };
 
@@ -76,6 +77,7 @@ exports.isVersionGreaterThan = function (version, compareVersion) {
 
 exports.addTorrent = async function (clientUrl, cookie, torrentUrl, isSkipChecking, uploadLimit, downloadLimit, savePath, category, autoTMM, firstLastPiecePrio, paused) {
   const apiVersion = await exports.getCachedApiVersion(clientUrl, cookie);
+  if (paused && !apiVersion) throw new Error('无法确认暂停参数版本，拒绝添加暂停任务');
   const pausedParam = apiVersion && exports.isVersionGreaterThan(apiVersion, '2.9.3') ? 'stopped' : 'paused';
 
   const message = {
@@ -109,6 +111,7 @@ exports.addTorrent = async function (clientUrl, cookie, torrentUrl, isSkipChecki
 
 exports.addTorrentByTorrentFile = async function (clientUrl, cookie, filepath, isSkipChecking, uploadLimit, downloadLimit, savePath, category, autoTMM, firstLastPiecePrio, paused) {
   const apiVersion = await exports.getCachedApiVersion(clientUrl, cookie);
+  if (paused && !apiVersion) throw new Error('无法确认暂停参数版本，拒绝添加暂停任务');
   const pausedParam = apiVersion && exports.isVersionGreaterThan(apiVersion, '2.9.3') ? 'stopped' : 'paused';
 
   const message = {
@@ -248,7 +251,24 @@ exports.getFiles = async (clientUrl, cookie, hash) => {
     }
   };
   const res = await util.requestPromise(message);
-  return JSON.parse(res.body);
+  if (res.statusCode !== 200) throw new Error('读取文件列表失败: ' + res.statusCode);
+  const files = JSON.parse(res.body);
+  if (!Array.isArray(files)) throw new Error('无效的文件列表');
+  return files;
+};
+
+exports.getTorrent = async (clientUrl, cookie, hash) => {
+  const res = await util.requestPromise({ url: clientUrl + '/api/v2/torrents/info?hashes=' + encodeURIComponent(hash), headers: { cookie } });
+  if (res.statusCode !== 200) throw new Error('查询种子失败: ' + res.statusCode);
+  const torrents = JSON.parse(res.body);
+  if (!Array.isArray(torrents)) throw new Error('无效的种子查询结果');
+  const torrent = torrents.find(t => t.hash.toLowerCase() === hash.toLowerCase());
+  return torrent && { ...torrent, savePath: torrent.save_path, completed: torrent.completed, size: torrent.total_size || torrent.size };
+};
+
+exports.recheckTorrent = async (clientUrl, cookie, hash) => {
+  const res = await util.requestPromise({ url: clientUrl + '/api/v2/torrents/recheck', method: 'POST', headers: { cookie }, form: { hashes: hash } });
+  if (res.statusCode !== 200 && res.statusCode !== 204) throw new Error('校验请求失败: ' + res.statusCode);
 };
 
 exports.getLogs = async (clientUrl, cookie) => {

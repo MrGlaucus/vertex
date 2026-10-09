@@ -19,6 +19,14 @@ const logger = require('./logger');
 const scrape = require('./scrape');
 
 const db = new Database(path.join(__dirname, '../db/sql.db'));
+require('./brush-store').configure(db);
+exports.backupDatabase = filename => db.backup(filename);
+exports.checkDatabase = filename => {
+  const backup = new Database(filename, { readonly: true, fileMustExist: true });
+  try {
+    if (backup.pragma('quick_check', { simple: true }) !== 'ok') throw new Error('备份数据库完整性检查失败');
+  } finally { backup.close(); }
+};
 puppeteer.use(StealthPlugin());
 
 let browser;
@@ -98,7 +106,7 @@ exports.requestPromise = async function (_options, usePuppeteer = true) {
   if (global.trustAllCerts) {
     options.rejectUnauthorized = !global.trustAllCerts;
   }
-  const res = await exports._requestPromise(options);
+  const res = await require('./request-limit').run(new URL(options.url).origin, 4, () => exports._requestPromise(options));
   if (usePuppeteer && res.body && typeof res.body === 'string' && (res.body.indexOf('trk_jschal_js') !== -1 || res.body.indexOf('jschl-answer') !== -1 || (res.body.indexOf('cloudflare-static') !== -1 && res.body.indexOf('email-decode.min.js') === -1))) {
     logger.info(new url.URL(options.url).hostname, '疑似遇到 5s 盾, 启用 Puppeteer 抓取页面....');
     return await exports.requestUsePuppeteer(options);

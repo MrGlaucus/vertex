@@ -550,10 +550,16 @@ class TorrentMod {
     const client = global.runningClient[options.clientId];
     let isError = false;
     try {
-      await client.client.deleteTorrent(client.clientUrl, client.cookie, options.hash, true);
+      const torrent = client.maindata.torrents.find(t => t.hash === options.hash);
+      if (!torrent) throw new Error('未找到目标种子');
+      const protectedBy = await require('../libs/delete-protection').protection(client, torrent, true);
+      if (protectedBy && options.files && options.files.length) throw new Error('关联数据受保护，不能同时删除链接文件: ' + protectedBy);
+      const deletedFiles = await client.deleteTorrent(torrent, { alias: '手动删除', onlyDeleteTorrent: !!protectedBy });
+      if (!deletedFiles && options.files && options.files.length) throw new Error('种子已移除，共享数据受保护，未删除链接文件');
     } catch (e) {
       isError = true;
       logger.error('删除种子失败: ', e);
+      throw e;
     }
     for (const file of options.files) {
       const { server, filepath } = file;

@@ -1,0 +1,10 @@
+.git
+.github
+node_modules
+webui/node_modules
+app/data
+app/db
+logs
+torrents
+*.tar.gz
+.env*

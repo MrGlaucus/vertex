@@ -1,10 +1,7 @@
 #! /bin/bash
 
-if [ -d '/tmp/vertex' ]; then
-  rm -rf /vertex/*
-  mv /tmp/vertex/* /vertex
-  rm -rf /tmp/vertex
-fi
+# Validate and switch staged restores before Redis and the application open files.
+node /app/vertex/tools/apply-restore.js /vertex || exit 1
 
 if [ ! -d '/vertex/data' ]; then
   mkdir /vertex/data/rss -p
@@ -126,7 +123,9 @@ echo "
 
 STARTING....
 "
-cp /app/vertex/app/config_backup/logger.yaml /vertex/config/logger.yaml
+if [ ! -f '/vertex/config/logger.yaml' ]; then
+  cp /app/vertex/app/config_backup/logger.yaml /vertex/config/logger.yaml
+fi
 
 VUID=`[ $PUID ] && echo $PUID || echo 0`
 VGID=`[ $PGID ] && echo $PGID || echo 0`

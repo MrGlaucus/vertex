@@ -1,0 +1,26 @@
+# Build from the current checkout after compiling webui, without cloning upstream.
+FROM lswl/vertex-base:latest
+ENV TZ=Asia/Shanghai
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+WORKDIR /app/vertex
+COPY package.json package-lock.json ./
+RUN apk add --no-cache --virtual .vertex-build gcc g++ python3 cmake make npm libc-dev \
+    && npm ci --only=production \
+    && apk del .vertex-build
+COPY app ./app
+COPY tools ./tools
+COPY docker/start.sh ./docker/start.sh
+RUN test -f app/static/index.html \
+    && mkdir -p /vertex \
+    && mv app/config app/config_backup \
+    && ln -s /vertex/config app/config \
+    && ln -s /vertex/data app/data \
+    && ln -s /vertex/db app/db \
+    && ln -s /vertex/logs logs \
+    && ln -s /vertex/torrents torrents \
+    && ln -s /app/localtime /etc/localtime \
+    && ln -s /usr/bin/chromium-browser /usr/bin/chromium \
+    && useradd -d /app/vertex -s /bin/sh vt \
+    && printf '\nbind 127.0.0.1\ndaemonize yes\n' >> /app/redis.conf
+EXPOSE 3000
+CMD ["bash", "/app/vertex/docker/start.sh"]

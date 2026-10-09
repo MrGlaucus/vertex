@@ -4,6 +4,7 @@ const path = require('path');
 const util = require('../libs/util');
 class RssRuleMod {
   add (options) {
+    options = this.normalize(options);
     const id = util.uuid.v4().split('-')[0];
     const rssRuleSet = {
       id
@@ -23,6 +24,7 @@ class RssRuleMod {
   };
 
   modify (options) {
+    options = this.normalize(options);
     const rssRuleSet = {};
     for (const key of Object.keys(options)) {
       if (options[key] !== undefined && options[key] !== '') {
@@ -37,11 +39,23 @@ class RssRuleMod {
     return '修改 Rss 规则成功';
   };
 
+  normalize (options) {
+    const rule = { ...options };
+    if (rule.priority !== undefined && rule.priority !== '' && !Number.isFinite(Number(rule.priority))) throw new Error('优先级必须为数字');
+    if (Object.prototype.hasOwnProperty.call(rule, 'clientArr')) {
+      if (!Array.isArray(rule.clientArr) || rule.clientArr.some(id => typeof id !== 'string')) throw new Error('下载器组必须为下载器 ID 数组');
+      rule.clientArr = [...new Set(rule.clientArr)];
+      // Preserve an unchanged legacy override; changing the group opts into routing.
+      if (!(rule.client && rule.clientArr.length === 1 && rule.clientArr[0] === rule.client)) delete rule.client;
+    }
+    return rule;
+  }
+
   list () {
     const rssRuleList = util.listRssRule();
     const rssList = util.listRss();
     for (const rssRule of rssRuleList) {
-      rssRule.used = rssList.some(item => (item._rejectRules || []).indexOf(rssRule.id) !== -1 || (item._acceptRules || []).indexOf(rssRule.id) !== -1);
+      rssRule.used = rssList.some(item => (item.rejectRules || item._rejectRules || []).indexOf(rssRule.id) !== -1 || (item.acceptRules || item._acceptRules || []).indexOf(rssRule.id) !== -1);
     }
     return rssRuleList;
   };

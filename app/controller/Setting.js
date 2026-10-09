@@ -206,7 +206,7 @@ class Setting {
     } catch (e) {
       logger.error(e);
       res.send({
-        success: true,
+        success: false,
         message: e.message
       });
     }

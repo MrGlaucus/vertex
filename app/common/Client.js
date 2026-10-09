@@ -7,6 +7,11 @@ const moment = require('moment');
 const logger = require('../libs/logger');
 const cron = require('node-cron');
 const Push = require('./Push');
+const capacity = require('../libs/capacity');
+const recovery = require('../libs/brush-recovery');
+const requestLimit = require('../libs/request-limit');
+const deletion = require('../libs/delete-protection');
+const store = require('../libs/brush-store');
 
 const clients = {
   qBittorrent: qb,
@@ -161,17 +166,18 @@ class Client {
       }
     }
     if (!fitTimeJob && rule.fitTime) {
-      if (this.fitTime[rule.id][torrent.hash]) {
+      if (this.fitTime && this.fitTime[rule.id] && this.fitTime[rule.id][torrent.hash]) {
         logger.debug('开始时间:', moment(this.fitTime[rule.id][torrent.hash] * 1000 || 0).format('YYYY-MM-DD HH:mm:ss'), '设置持续时间:', rule.fitTime,
           '删种规则: ', rule.alias, '种子: ', torrent.name);
       }
-      fit = fit && (moment().unix() - this.fitTime[rule.id][torrent.hash] > rule.fitTime);
+      fit = fit && (this.fitTime && this.fitTime[rule.id] && moment().unix() - this.fitTime[rule.id][torrent.hash] > rule.fitTime);
     }
     return fit;
   };
 
   destroy () {
     logger.info('销毁下载器实例', this.alias);
+    this.stopped = true;
     this.maindataJob.stop();
     delete this.maindataJob;
     if (this.trackerSyncJob) {
@@ -286,6 +292,11 @@ class Client {
           this.maindata.seedingCount += 1;
         }
       });
+      this.capacityUpdatedAt = Date.now();
+      capacity.snapshot(this);
+      for (const entry of store.list('deletion').filter(e => e.clientId === this.id)) {
+        if (!maindata.torrents.some(t => t.hash === entry.hash)) store.remove('deletion', this.id + ':' + entry.hash);
+      }
       this.avgDownloadSpeed = maindata.downloadSpeed * 0.1 + this.avgDownloadSpeed * 0.9;
       this.avgUploadSpeed = maindata.uploadSpeed * 0.1 + this.avgUploadSpeed * 0.9;
       /*
@@ -322,39 +333,87 @@ class Client {
     }
   };
 
-  async addTorrent (torrentUrl, hash, isSkipChecking = false, uploadLimit = 0, downloadLimit = 0, savePath, category, autoTMM, paused) {
-    if (!this.status) {
-      throw new Error('客户端' + this.alias + '当前状态为不可用');
-    }
-    const { statusCode } = await this.client.addTorrent(this.clientUrl, this.cookie, torrentUrl, isSkipChecking, uploadLimit, downloadLimit, savePath, category, autoTMM, this.firstLastPiecePrio, paused);
-    if (statusCode !== 200 && statusCode !== 202 && statusCode !== 204) {
-      this.login();
-      throw new Error('状态码: ' + statusCode);
-    }
-    if (this.maindata) {
-      this.maindata.leechingCount += 1;
-    }
-    await util.runRecord('insert into torrent_flow (hash, upload, download, time) values (?, ?, ?, ?)',
-      [hash, 0, 0, moment().unix() - moment().unix() % 300]);
+  async addTorrent (torrentUrl, hash, isSkipChecking = false, uploadLimit = 0, downloadLimit = 0, savePath, category, autoTMM, paused, admission = {}) {
+    const request = { method: 'url', target: torrentUrl, hash, size: admission.size || 0, isSkipChecking, uploadLimit, downloadLimit, savePath, category, autoTMM, paused };
+    return this._managedAdd(request, admission);
   };
 
-  async addTorrentTag (hash, tag) {
-    if (this._client.type === 'qBittorrent') {
-      await this.client.addTorrentTag(this.clientUrl, this.cookie, hash, tag);
+  async _managedAdd (request, admission) {
+    if (admission.reseed && !admission.locked) return requestLimit.run('data:' + this.id, 1, () => this._managedAdd(request, { ...admission, locked: true }));
+    if (admission.reseed) {
+      if (store.get('deletion', this.id + ':' + admission.reseed.sourceHash)) throw new Error('辅种原种正在删除');
+      const source = await recovery.lookup(this, admission.reseed.sourceHash);
+      if (!recovery.completed(source) || source.savePath !== request.savePath) throw new Error('辅种原种状态或保存路径已变化');
+    }
+    const method = request.method === 'file' ? 'addTorrentByTorrentFile' : 'addTorrent';
+    if (typeof this.client[method] !== 'function') throw new Error('该下载器不支持此推送方式');
+    let reservation;
+    let job;
+    let httpAccepted = false;
+    try {
+      store.transaction(() => {
+        reservation = capacity.reserve(this, request.hash, request.size, { maxCount: admission.maxCount, reseed: !!admission.reseed || request.isSkipChecking });
+        job = recovery.begin(this, request.hash, request, admission);
+      });
+      const response = await requestLimit.run('add:' + this.id, 1, () => this.client[method](this.clientUrl, this.cookie, request.target, request.isSkipChecking, request.uploadLimit, request.downloadLimit, request.savePath, request.category, request.autoTMM, this.firstLastPiecePrio, request.paused));
+      const { statusCode, body } = response;
+      if (statusCode !== 200 && statusCode !== 202 && statusCode !== 204) {
+        const error = new Error('状态码: ' + statusCode);
+        error.definite = statusCode >= 400 && statusCode < 500 && statusCode !== 408;
+        throw error;
+      }
+      if ((typeof body === 'string' && body.trim() === 'Fails.') || (body && typeof body === 'object' && body.error)) {
+        const error = new Error('下载器返回添加错误');
+        error.definite = typeof body === 'string';
+        throw error;
+      }
+      if (this._client.type === 'Transmission' && body) {
+        const result = typeof body === 'string' ? JSON.parse(body) : body;
+        if (result.result !== 'success') {
+          const error = new Error('Transmission 拒绝添加: ' + result.result);
+          error.definite = true;
+          throw error;
+        }
+      }
+      httpAccepted = true;
+      store.transaction(() => {
+        reservation.accepted();
+        recovery.accepted(job);
+      });
+    } catch (error) {
+      if (httpAccepted) logger.error('下载器已接受请求，状态记录待恢复:', error);
+      else {
+        store.transaction(() => {
+          if (reservation) {
+            if (!job || error.definite) reservation.release();
+            else reservation.uncertain();
+          }
+          if (job) recovery.failed(job, error, !!error.definite);
+        });
+        throw error;
+      }
+    } finally {
+      if (job) recovery.end(job.id);
+    }
+    try {
+      if (job.reseed) await recovery.recordHistory(job);
+      await util.runRecord('insert into torrent_flow (hash, upload, download, time) values (?, ?, ?, ?)',
+        [request.hash, 0, 0, moment().unix() - moment().unix() % 300]);
+    } catch (error) {
+      logger.error('种子已添加，流量记录写入失败:', error);
     }
   }
 
-  async addTorrentByTorrentFile (filepath, hash, isSkipChecking = false, uploadLimit = 0, downloadLimit = 0, savePath, category, autoTMM, paused) {
-    const { statusCode } = await this.client.addTorrentByTorrentFile(this.clientUrl, this.cookie, filepath, isSkipChecking, uploadLimit, downloadLimit, savePath, category, autoTMM, this.firstLastPiecePrio, paused);
-    if (statusCode !== 200 && statusCode !== 202 && statusCode !== 204) {
-      this.login();
-      throw new Error('状态码: ' + statusCode);
+  async addTorrentTag (hash, tag) {
+    if (this._client.type === 'qBittorrent') {
+      const result = await this.client.addTorrentTag(this.clientUrl, this.cookie, hash, tag);
+      if (result.statusCode !== 200 && result.statusCode !== 204) throw new Error('标签请求失败: ' + result.statusCode);
     }
-    if (this.maindata) {
-      this.maindata.leechingCount += 1;
-    }
-    await util.runRecord('insert into torrent_flow (hash, upload, download, time) values (?, ?, ?, ?)',
-      [hash, 0, 0, moment().unix() - moment().unix() % 300]);
+  }
+
+  async addTorrentByTorrentFile (filepath, hash, isSkipChecking = false, uploadLimit = 0, downloadLimit = 0, savePath, category, autoTMM, paused, admission = {}) {
+    const request = { method: 'file', target: filepath, hash, size: admission.size || 0, isSkipChecking, uploadLimit, downloadLimit, savePath, category, autoTMM, paused };
+    return this._managedAdd(request, admission);
   };
 
   async reannounceTorrent (torrent) {
@@ -368,33 +427,56 @@ class Client {
     }
   };
 
-  async deleteTorrent (torrent, rule) {
-    let isDeleteFiles = true;
-    try {
-      for (const _torrent of this.maindata.torrents) {
-        if (_torrent.name === torrent.name && _torrent.size === torrent.size && _torrent.hash !== torrent.hash && _torrent.savePath === torrent.savePath) {
-          isDeleteFiles = false;
-        }
+  async previewDelete () {
+    if (!this.maindata) throw new Error('下载器状态不可用');
+    const context = Object.create(this);
+    context.maindata = JSON.parse(JSON.stringify(this.maindata));
+    const torrents = context.maindata.torrents.sort((a, b) => (a.completedTime <= 0 ? moment().unix() : a.completedTime) - (b.completedTime <= 0 ? moment().unix() : b.completedTime) || a.addedTime - b.addedTime);
+    const used = new Set();
+    const result = [];
+    for (const rule of this.deleteRules) {
+      let count = 0;
+      for (const torrent of torrents) {
+        if (used.has(torrent.hash) || count >= (Number(rule.deleteNum) || 1)) continue;
+        if (this.rejectDeleteRules.some(r => context._fitDeleteRule(r, torrent))) continue;
+        if ((rule.pause || rule.limitSpeed) && this.pausedTorrentHashes.includes(torrent.hash)) continue;
+        if (!context._fitDeleteRule(rule, torrent)) continue;
+        const protectedBy = await deletion.protection(this, torrent);
+        result.push({ hash: torrent.hash, name: torrent.name, size: torrent.size, ruleId: rule.id, rule: rule.alias, action: rule.pause ? '暂停' : rule.limitSpeed ? '限速' : rule.onlyDeleteTorrent || protectedBy ? '仅删种' : '删种及文件', protectedBy });
+        used.add(torrent.hash);
+        count++;
       }
-      if (rule.onlyDeleteTorrent) {
-        isDeleteFiles = false;
-      }
-      if (rule.limitSpeed) {
-        await this.setSpeedLimit(torrent.hash, 'download', rule.limitSpeed);
-        this.pausedTorrentHashes.push(torrent.hash);
-      } else if (rule.pause) {
-        await this.pauseTorrent(torrent.hash);
-        this.pausedTorrentHashes.push(torrent.hash);
-      } else {
-        await this.client.deleteTorrent(this.clientUrl, this.cookie, torrent.hash, isDeleteFiles);
-      }
-      logger.info('下载器', this.alias, '删除种子成功:', torrent.name, rule.alias);
-      await this.ntf.deleteTorrent(this._client, torrent, rule, isDeleteFiles);
-    } catch (error) {
-      logger.error('下载器', this.alias, '删除种子失败:', torrent.name, '\n', error);
-      await this.ntf.deleteTorrentError(this._client, torrent, rule);
     }
-    return isDeleteFiles;
+    return result;
+  }
+
+  async deleteTorrent (torrent, rule) {
+    return requestLimit.run('data:' + this.id, 1, async () => {
+      const protectedBy = await deletion.protection(this, torrent, true);
+      const isDeleteFiles = !rule.onlyDeleteTorrent && !protectedBy;
+      try {
+        if (rule.limitSpeed) {
+          await this.setSpeedLimit(torrent.hash, 'download', rule.limitSpeed);
+          this.pausedTorrentHashes.push(torrent.hash);
+        } else if (rule.pause) {
+          await this.pauseTorrent(torrent.hash);
+          this.pausedTorrentHashes.push(torrent.hash);
+        } else {
+          store.put('deletion', this.id + ':' + torrent.hash, { clientId: this.id, hash: torrent.hash, time: Date.now() });
+          const response = await this.client.deleteTorrent(this.clientUrl, this.cookie, torrent.hash, isDeleteFiles);
+          if (response && response.statusCode !== 200 && response.statusCode !== 204) throw new Error('删除请求失败: ' + response.statusCode);
+          if (response && response.body && typeof response.body === 'object' && response.body.error) throw new Error('下载器拒绝删除');
+          if (this._client.type === 'Transmission' && response && response.body && (typeof response.body === 'string' ? JSON.parse(response.body) : response.body).result !== 'success') throw new Error('Transmission 拒绝删除');
+          deletion.removed(this, torrent.hash);
+        }
+        store.event({ clientId: this.id, hash: torrent.hash, name: torrent.name, outcome: rule.pause || rule.limitSpeed ? 'controlled' : 'deleted', reason: rule.alias + (protectedBy ? ': ' + protectedBy : ''), deleteFiles: isDeleteFiles });
+        try { await this.ntf.deleteTorrent(this._client, torrent, rule, isDeleteFiles); } catch (error) { logger.error('删种通知失败:', error); }
+        return isDeleteFiles;
+      } catch (error) {
+        logger.error('删除种子失败:', error);
+        throw error;
+      }
+    });
   };
 
   async autoReannounce () {
@@ -416,6 +498,12 @@ class Client {
   }
 
   async autoDelete () {
+    if (this.deleting) return;
+    this.deleting = true;
+    try { await this._autoDelete(); } finally { this.deleting = false; }
+  }
+
+  async _autoDelete () {
     if (!this.maindata || !this.maindata.torrents || this.maindata.torrents.length === 0) return;
     const torrents = this.maindata.torrents.sort((a, b) =>
       (a.completedTime <= 0 ? moment().unix() : a.completedTime) - (b.completedTime <= 0 ? moment().unix() : b.completedTime) ||
@@ -448,16 +536,23 @@ class Client {
           continue;
         }
         if (this._fitDeleteRule(rule, torrent)) {
-          deletedNum += 1;
           await this.reannounceTorrent(torrent);
           logger.info(torrent.name, '重新汇报完毕, 等待 2s');
           await util.sleep(2000);
+          if (this.stopped) return;
+          const previousUpdate = this.capacityUpdatedAt;
+          await this.getMaindata();
+          if (this.capacityUpdatedAt === previousUpdate) return;
+          if (!this.status || !this.maindata || this.stopped) return;
+          const current = this.maindata.torrents.find(t => t.hash === torrent.hash);
+          if (!current || !this._fitDeleteRule(rule, current) || this.rejectDeleteRules.some(r => this._fitDeleteRule(r, current))) continue;
           logger.info(torrent.name, '等待 2s 完毕, 执行删种');
+          const deleteFiles = await this.deleteTorrent(current, rule);
+          deletedNum += 1;
           await util.runRecord('update torrents set size = ?, tracker = ?, upload = ?, download = ?, delete_time = ?, record_note = ? where hash = ?',
             [torrent.size, torrent.tracker, torrent.uploaded, torrent.downloaded, moment().unix(), `删种规则: ${rule.alias}`, torrent.hash]);
           await util.runRecord('insert into torrent_flow (hash, upload, download, time) values (?, ?, ?, ?)',
             [torrent.hash, torrent.uploaded, torrent.downloaded, moment().unix()]);
-          const deleteFiles = await this.deleteTorrent(torrent, rule);
           deletedTorrentHash.push(torrent.hash);
           if (!deleteFiles) {
             return;
@@ -603,13 +698,15 @@ class Client {
 
   async resumeTorrent (hash) {
     if (this._client.type === 'qBittorrent') {
-      await this.client.resumeTorrent(this.clientUrl, this.cookie, hash);
+      const response = await this.client.resumeTorrent(this.clientUrl, this.cookie, hash);
+      if (response.statusCode !== 200 && response.statusCode !== 204) throw new Error('种子状态操作失败: ' + response.statusCode);
     }
   }
 
   async pauseTorrent (hash) {
     if (this._client.type === 'qBittorrent') {
-      await this.client.pauseTorrent(this.clientUrl, this.cookie, hash);
+      const response = await this.client.pauseTorrent(this.clientUrl, this.cookie, hash);
+      if (response.statusCode !== 200 && response.statusCode !== 204) throw new Error('种子状态操作失败: ' + response.statusCode);
     }
   }
 

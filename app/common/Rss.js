@@ -9,6 +9,10 @@ const fs = require('fs');
 const path = require('path');
 const moment = require('moment');
 const Push = require('./Push');
+const routing = require('../libs/rss-routing');
+const autoReseed = require('../libs/auto-reseed');
+const recovery = require('../libs/brush-recovery');
+const store = require('../libs/brush-store');
 
 class Rss {
   constructor (rss) {
@@ -22,7 +26,7 @@ class Rss {
     this.clientSortBy = rss.clientSortBy;
     this.autoReseed = rss.autoReseed;
     this.onlyReseed = rss.onlyReseed;
-    this.reseedClients = rss.reseedClients;
+    this.reseedClients = rss.reseedClients || rss.clientArr || [rss.client];
     this.pushMessage = rss.pushMessage;
     this.skipSameTorrent = rss.skipSameTorrent;
     this.scrapeFree = rss.scrapeFree;
@@ -45,8 +49,8 @@ class Rss {
     this.ntf = new Push(this.notify);
     this._acceptRules = rss.acceptRules || [];
     this._rejectRules = rss.rejectRules || [];
-    this.acceptRules = util.listRssRule().filter(item => (this._acceptRules.indexOf(item.id) !== -1)).sort((a, b) => +b.priority - +a.priority);
-    this.rejectRules = util.listRssRule().filter(item => (this._rejectRules.indexOf(item.id) !== -1)).sort((a, b) => +b.priority - +a.priority);
+    this.acceptRules = routing.orderedRules(util.listRssRule(), this._acceptRules, this._rss.ruleOrder || 'legacy');
+    this.rejectRules = routing.orderedRules(util.listRssRule(), this._rejectRules, this._rss.ruleOrder || 'legacy');
     this.downloadLimit = util.calSize(rss.downloadLimit, rss.downloadLimitUnit);
     this.uploadLimit = util.calSize(rss.uploadLimit, rss.uploadLimitUnit);
     this.maxClientUploadSpeed = util.calSize(rss.maxClientUploadSpeed, rss.maxClientUploadSpeedUnit);
@@ -81,7 +85,9 @@ class Rss {
 
   async _downloadTorrent (url, _hash) {
     if (_hash && fs.existsSync(path.join(__dirname, '../../torrents', _hash + '.torrent'))) {
-      return { hash: _hash, filepath: path.join(__dirname, '../../torrents', _hash + '.torrent') };
+      const filepath = path.join(__dirname, '../../torrents', _hash + '.torrent');
+      const info = bencode.decode(fs.readFileSync(filepath)).info;
+      return { hash: crypto.createHash('sha1').update(bencode.encode(info)).digest('hex'), filepath, size: info.length || info.files.reduce((sum, f) => sum + f.length, 0) };
     }
     const res = await util.requestPromise({
       url: url,
@@ -181,6 +187,7 @@ class Rss {
 
   destroy () {
     logger.info('销毁 Rss 实例:', this.alias);
+    this.stopped = true;
     this.rssJob.stop();
     delete this.rssJob;
     this.clearCount.stop();
@@ -190,8 +197,8 @@ class Rss {
 
   reloadRssRule () {
     logger.info('重新载入 Rss 规则', this.alias);
-    this.acceptRules = util.listRssRule().filter(item => (this._acceptRules.indexOf(item.id) !== -1)).sort((a, b) => +b.priority - +a.priority);
-    this.rejectRules = util.listRssRule().filter(item => (this._rejectRules.indexOf(item.id) !== -1)).sort((a, b) => +b.priority - +a.priority);
+    this.acceptRules = routing.orderedRules(util.listRssRule(), this._acceptRules, this._rss.ruleOrder || 'legacy');
+    this.rejectRules = routing.orderedRules(util.listRssRule(), this._rejectRules, this._rss.ruleOrder || 'legacy');
   }
 
   reloadPush () {
@@ -201,36 +208,7 @@ class Rss {
     this.ntf = new Push(this.notify);
   }
 
-  async _pushTorrent (torrent, _client) {
-    if (this.autoReseed && torrent.hash.indexOf('fakehash') === -1) {
-      for (const key of this.reseedClients) {
-        const client = global.runningClient[key];
-        if (!client) {
-          logger.error('Rss', this.alias, '下载器', key, '不存在');
-          continue;
-        }
-        for (const _torrent of client.maindata.torrents) {
-          if (+_torrent.size === +torrent.size && +_torrent.completed === +_torrent.size) {
-            const bencodeInfo = await rss.getTorrentNameByBencode(torrent.url);
-            if (_torrent.name === bencodeInfo.name && _torrent.hash !== bencodeInfo.hash) {
-              try {
-                this.addCount += 1;
-                await client.addTorrent(torrent.url, torrent.hash, true, this.uploadLimit, this.downloadLimit, _torrent.savePath, this.category);
-                await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, category, link, record_time, add_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                  [torrent.hash, torrent.name, torrent.size, this.id, this.category, torrent.link, moment().unix(), moment().unix(), 1, '辅种']);
-                await this.ntf.addTorrent(this._rss, client, torrent);
-                return;
-              } catch (error) {
-                logger.error(this.alias, '下载器', client, '添加种子', torrent.name, '失败\n', error);
-                await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, category, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                  [torrent.hash, torrent.name, torrent.size, this.id, this.category, torrent.link, moment().unix(), 3, '辅种失败']);
-                await this.ntf.addTorrentError(this._rss, client, torrent);
-              }
-            }
-          }
-        }
-      }
-    }
+  async _pushTorrent (torrent, _client, fitRule = {}) {
     if (!this.onlyReseed) {
       let speed;
       if (_client.sameServerClients) {
@@ -267,13 +245,6 @@ class Rss {
         await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
           [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, `拒绝原因: 低于下载器最小剩余空间 ${util.formatSize(_client.maindata.freeSpaceOnDisk)}`]);
         await this.ntf.rejectTorrent(this._rss, _client, torrent, `拒绝原因: 低于下载器最小剩余空间 ${util.formatSize(_client.maindata.freeSpaceOnDisk)}`);
-        return;
-      }
-      const fitRules = this.acceptRules.filter(item => this._fitRule(item, torrent));
-      if (fitRules.length === 0 && this.acceptRules.length !== 0) {
-        await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
-          [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, '拒绝原因: 不符合所有规则']);
-        await this.ntf.rejectTorrent(this._rss, _client, torrent, '拒绝原因: 不符合所有规则');
         return;
       }
       if (this.scrapeFree) {
@@ -337,32 +308,32 @@ class Rss {
           return;
         }
       }
-      const fitRule = fitRules[0] || {};
       let savePath = fitRule.savePath || this.savePath;
       if (savePath) {
         savePath = savePath.replace('{RANDOM}', util.uuid.v4().replace(/-/g, ''));
       }
       const category = fitRule.category || this.category;
-      const client = fitRule.client ? global.runningClient[fitRule.client] : _client;
+      const client = _client;
+      let accepted = false;
       try {
         let truehash = '';
-        this.addCount += 1;
-        if (this.pushTorrentFile) {
-          const { filepath, hash } = await this._downloadTorrent(torrent.url, torrent.hash);
-          truehash = hash;
-          await client.addTorrentByTorrentFile(filepath, hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused);
-        } else {
-          if (this.useCustomRegex) {
-            const match = this.regexStr.match(/^\/(.*)\/([gimuy]*)$/);
-            if (match) {
-              const [, pattern, flags] = match;
-              const regex = new RegExp(pattern, flags);
-              await client.addTorrent(torrent.url.replace(regex, this.replaceStr), torrent.hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused);
-            }
-          } else {
-            await client.addTorrent(torrent.url, torrent.hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused);
-          }
+        if (this.stopped) return;
+        let downloadUrl = torrent.url;
+        if (this.useCustomRegex && !this.pushTorrentFile) {
+          const match = (this.regexStr || '').match(/^\/(.*)\/([gimuy]*)$/);
+          if (!match) throw new Error('自定义下载链接正则表达式无效');
+          downloadUrl = downloadUrl.replace(new RegExp(match[1], match[2]), this.replaceStr);
         }
+        if (this.pushTorrentFile || torrent.hash.indexOf('fakehash') !== -1) {
+          const { filepath, hash, size } = await this._downloadTorrent(downloadUrl, torrent.hash);
+          truehash = hash;
+          if (this.stopped) return;
+          await client.addTorrentByTorrentFile(filepath, hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused, { size: size || torrent.size, maxCount: this.maxClientDownloadCount, rssId: this.id, feedHash: torrent.hash, name: torrent.name, ruleId: fitRule.id, ruleAlias: fitRule.alias });
+        } else {
+          await client.addTorrent(downloadUrl, torrent.hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused, { size: torrent.size, maxCount: this.maxClientDownloadCount, rssId: this.id, feedHash: torrent.hash, name: torrent.name, ruleId: fitRule.id, ruleAlias: fitRule.alias });
+        }
+        accepted = true;
+        this.addCount += 1;
         try {
           await this.ntf.addTorrent(this._rss, client, torrent);
         } catch (e) {
@@ -375,9 +346,13 @@ class Rss {
             [truehash, torrent.name, torrent.size, this.id, torrent.link, category, moment().unix(), moment().unix(), 1, '添加种子']);
         }
       } catch (error) {
+        if (accepted) {
+          logger.error(this.alias, '种子添加请求已接受，历史记录写入失败:', error.message);
+          return;
+        }
         logger.error(this.alias, '下载器', client.alias, '添加种子失败:', error.message);
         await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
-          [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 3, '添加种子失败']);
+          [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), error.code === 'CAPACITY_REJECTED' ? 2 : 3, '添加未完成: ' + error.message]);
         try {
           await this.ntf.addTorrentError(this._rss, client, torrent);
         } catch (e) {
@@ -388,33 +363,30 @@ class Rss {
   }
 
   async rss (_torrents) {
+    if (this.processing || this.stopped) return;
+    this.processing = true;
+    try {
+      await this._runRss(_torrents);
+    } finally {
+      this.processing = false;
+    }
+  }
+
+  async _runRss (_torrents) {
     let torrents = [];
     if (_torrents) {
       torrents = _torrents;
     } else {
       torrents = (await Promise.all(this.urls.map(url => rss.getTorrents(url)))).flat();
     }
+    torrents = [...new Map([...torrents, ...autoReseed.waiting(this.id)].map(t => [t.hash, t])).values()];
     for (const torrent of torrents) {
-      const availableClients = this.clientArr
-        .map(item => global.runningClient[item])
-        .filter(item => {
-          return !!item && !!item.status && !!item.maindata &&
-            (!this.maxClientUploadSpeed || this.maxClientUploadSpeed > item.avgUploadSpeed) &&
-            (!this.maxClientDownloadSpeed || this.maxClientDownloadSpeed > item.avgDownloadSpeed) &&
-            (!this.maxClientDownloadCount || this.maxClientDownloadCount > item.maindata.leechingCount);
-        });
-      const firstClient = availableClients
-        .filter(item => {
-          return (!item.maxDownloadSpeed || item.maxDownloadSpeed > item.avgDownloadSpeed) &&
-            (!item.maxUploadSpeed || item.maxUploadSpeed > item.avgUploadSpeed) &&
-            (!item.maxLeechNum || item.maxLeechNum > item.maindata.leechingCount) &&
-            (!item.minFreeSpace || item.minFreeSpace < item.maindata.freeSpaceOnDisk);
-        })
-        .sort((a, b) => (this.clientSortBy === 'freeSpaceOnDisk' ? -1 : 1) *
-          (a.maindata[this.clientSortBy] - b.maindata[this.clientSortBy])
-        )[0] || availableClients[0];
+      if (this.stopped) return;
       const sqlRes = await util.getRecord('SELECT * FROM torrents WHERE hash = ? AND rss_id = ?', [torrent.hash, this.id]);
-      if (sqlRes && sqlRes.id) continue;
+      const oldJob = recovery.forFeed(this.id, torrent.hash);
+      const retry = oldJob && oldJob.state === 'failed' && oldJob.attempts < 5 && oldJob.nextAt <= Date.now();
+      if (oldJob && !retry) continue;
+      if (sqlRes && sqlRes.id && !retry) continue;
       if (torrent.name.indexOf('[FROZEN]') !== -1) continue;
       if (this.addCount >= this.addCountPerHour) {
         await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
@@ -428,13 +400,6 @@ class Rss {
         await this.ntf.rejectTorrent(this._rss, undefined, torrent, '拒绝原因: 最长休眠时间');
         continue;
       }
-      if (!firstClient) {
-        await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
-          [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, '拒绝原因: 无可用下载器']);
-        await this.ntf.rejectTorrent(this._rss, undefined, torrent, '拒绝原因: 无可用下载器');
-        logger.error(this.alias, '无可用下载器');
-        continue;
-      }
       let reject = false;
       for (const rejectRule of this.rejectRules) {
         if (this._fitRule(rejectRule, torrent)) {
@@ -446,7 +411,35 @@ class Rss {
         }
       }
       if (!reject) {
-        await this._pushTorrent(torrent, firstClient);
+        // Legacy reseed tasks previously ran before acceptance rules and ordinary capacity.
+        // Keep that eligibility; new tasks can explicitly request rule filtering for reseeds.
+        const matches = this.acceptRules.find(rule => this._fitRule(rule, torrent));
+        if (!this._rss.reseedRespectRules || matches || !this.acceptRules.length) {
+          try {
+            if (await autoReseed.attempt(this, torrent, matches)) continue;
+          } catch (error) {
+            logger.error(this.alias, '辅种处理失败:', error.message);
+            store.event({ rssId: this.id, hash: torrent.hash, name: torrent.name, outcome: 'reseedError', reason: recovery.safeError(error) });
+            continue;
+          }
+        }
+        const fitRule = this.acceptRules.find(rule => this._fitRule(rule, torrent));
+        const selection = fitRule || !this.acceptRules.length
+          ? routing.select(this, torrent, fitRule, global.runningClient)
+          : { reason: '不符合所有选择规则' };
+        if (retry && selection.client && selection.client.id !== oldJob.clientId) {
+          const allowed = selection.candidates.some(c => c.id === oldJob.clientId && !c.reason);
+          if (allowed) selection.client = global.runningClient[oldJob.clientId];
+          else selection.reason = '恢复任务原下载器不符合当前规则或容量，不改投其他机器';
+        }
+        if (selection.reason) {
+          store.event({ rssId: this.id, hash: torrent.hash, name: torrent.name, outcome: 'rejected', reason: selection.reason });
+          await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
+            [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, '拒绝原因: ' + selection.reason]);
+          await this.ntf.rejectTorrent(this._rss, undefined, torrent, selection.reason);
+          continue;
+        }
+        await this._pushTorrent(torrent, selection.client, fitRule);
       }
     }
     this.lastRssTime = moment().unix();
@@ -466,17 +459,16 @@ class Rss {
       if (reject) {
         continue;
       }
-      const fitRules = this.acceptRules.filter(item => this._fitRule(item, torrent));
-      if (this.acceptRules.length === 0) {
-        torrent.status = '无选择规则, 默认选中该种子';
-        continue;
-      } else if (fitRules.length === 0) {
-        torrent.status = '未匹配到规则';
-        continue;
-      } else {
-        torrent.status = '匹配到选择规则: ' + fitRules[0].alias;
+      const rule = this.acceptRules.find(item => this._fitRule(item, torrent));
+      torrent.matchedRule = rule ? rule.alias : '无选择规则，默认接受';
+      if (!rule && this.acceptRules.length) {
+        torrent.status = '未匹配到选择规则';
         continue;
       }
+      const selection = routing.select(this, torrent, rule, global.runningClient);
+      torrent.candidates = selection.candidates;
+      torrent.downloader = selection.client ? selection.client.alias : '';
+      torrent.status = selection.reason || '可分配（仅检查规则与当前容量，未执行抓取、辅种或添加）';
     }
     return torrents;
   }

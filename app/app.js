@@ -48,6 +48,7 @@ const init = function () {
     }
   });
 
+  require('./libs/brush-recovery').setHistory(util);
   global.CONFIG = config;
   global.LOGGER = logger;
   global.SITE = sites;
@@ -149,6 +150,7 @@ const init = function () {
       global.runningIRC[irc.id] = new IRC(irc);
     }
   }
+  global.brushRecoveryJob = cron.schedule('* * * * *', () => require('./libs/brush-recovery').tick().catch(error => logger.error('刷流恢复失败:', error)));
   // cookiecloud
   util.initCookieCloud();
 };

@@ -15,6 +15,7 @@ const client = redis.createClient(config.getRedisConfig());
 const RedisStore = require('connect-redis')(session);
 
 const multipartMiddleware = new Multipart();
+const backupMultipart = new Multipart({ maxFilesSize: Number(process.env.VERTEX_BACKUP_UPLOAD_MAX_BYTES) || 512 * 1024 * 1024 });
 
 client.on('error', (err) => {
   logger.error('Redis:', err);
@@ -138,9 +139,15 @@ module.exports = function (app, express, router) {
   app.use('/api', express.text({ type: 'text/xml' }));
   app.use('/api', express.json({ limit: '50mb' }));
   app.use('/api', express.urlencoded({ extended: false }));
-  app.use('/api', multipartMiddleware);
   app.use(setIp);
   app.use(checkAuth);
+  app.use('/api', (req, res, next) => {
+    const parser = req.path === '/setting/restoreVertex' ? backupMultipart : multipartMiddleware;
+    parser(req, res, error => {
+      if (error) return res.status(error.status || 400).send({ success: false, message: '上传失败或超过大小限制' });
+      next();
+    });
+  });
   router.post('/user/login', ctrl.User.login);
   router.get('/user/logout', ctrl.User.logout);
   router.get('/user/get', ctrl.User.get);
@@ -172,6 +179,10 @@ module.exports = function (app, express, router) {
   router.post('/site/pushTorrent', ctrl.Site.pushTorrent);
   router.get('/site/listSite', ctrl.Site.listSite);
   router.get('/site/overview', ctrl.Site.overview);
+
+  router.get('/brush/overview', ctrl.Brush.overview);
+  router.post('/brush/action', ctrl.Brush.action);
+  router.get('/brush/deletePreview', ctrl.Brush.preview);
 
   router.get('/downloader/list', ctrl.Client.list);
   router.get('/downloader/listTop10', ctrl.Client.listTop10);
