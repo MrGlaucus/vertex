@@ -25,6 +25,8 @@ git push origin v1.0.0
 
 示例假设修改已经提交，`v1.0.0` 尚不存在。无需创建 GitHub Release；推送标签即可触发。在 GitHub Actions 查看 `Publish Docker Image on Tag`。
 
+如果需要重试已存在的标签，也可在该工作流选择 **Run workflow**，填写标签名称（如 `V1.0`）。手动触发仍检出指定标签源码，不会把之后的分支改动混入镜像。
+
 | Git 标签 | 推送的镜像标签 |
 | --- | --- |
 | `v1.0.0` | `mrglaucus/vertex:v1.0.0`、`mrglaucus/vertex:latest` |

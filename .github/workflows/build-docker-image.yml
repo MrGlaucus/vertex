@@ -4,16 +4,24 @@ on:
   push:
     tags:
       - '**'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing Git tag to build
+        required: true
+        default: V1.0
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: dockerhub-vertex-${{ github.ref }}
+  group: dockerhub-vertex-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
   IMAGE_NAME: mrglaucus/vertex
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
   PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: 'true'
 
 jobs:
@@ -24,6 +32,7 @@ jobs:
       - name: Check out tagged source
         uses: actions/checkout@v6
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -31,7 +40,7 @@ jobs:
         id: image
         shell: bash
         env:
-          GIT_TAG: ${{ github.ref_name }}
+          GIT_TAG: ${{ env.RELEASE_TAG }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
@@ -142,7 +151,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.version=${{ env.RELEASE_TAG }}
           cache-from: type=gha,scope=vertex-release
           cache-to: type=gha,mode=max,scope=vertex-release
 
