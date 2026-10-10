@@ -85,6 +85,41 @@ async function main () {
   assert.match(capacity.reason(old, 100, { hash: 'UNKNOWN' }), /正在添加/);
   assert.equal(capacity.snapshot({ ...old }).reserved, 1, 'recreated instances share reservations');
 
+  const relaxed = client({ _client: { capacityGuard: true, capacityMode: 'relaxed' }, minFreeSpace: 100 });
+  relaxed.maindata.torrents = [{ hash: 'slow', size: 10000, completed: 100, state: 'pausedDL' }];
+  assert.equal(capacity.snapshot(relaxed).free, 1000, 'relaxed mode uses actual disk free space without subtracting unfinished downloads');
+  assert.equal(capacity.reason(relaxed, 100000), '', 'relaxed mode does not subtract the proposed torrent size');
+  assert.equal(capacity.reason(relaxed, 0), '', 'unknown future size does not block relaxed mode');
+  const relaxedSlot = capacity.reserve(relaxed, 'relaxed-pending', 5000);
+  relaxedSlot.uncertain();
+  assert.equal(capacity.snapshot(relaxed).free, 1000, 'unconfirmed additions do not reserve disk bytes in relaxed mode');
+  assert.equal(capacity.snapshot(relaxed).reserved, 1, 'pending requests still count toward task limits');
+  assert.match(capacity.reason(relaxed, 1, { hash: 'relaxed-pending' }), /正在添加/);
+  assert.match(capacity.reason(relaxed, 1, { maxCount: 1 }), /RSS 下载任务上限/);
+  relaxed._client.capacityMode = 'strict';
+  assert.equal(capacity.snapshot(relaxed).free, -13900, 'switching back to strict mode accounts for existing pending bytes');
+  assert.match(capacity.reason(relaxed, 1), /预计剩余空间不足/);
+  relaxed._client.capacityMode = 'relaxed';
+  relaxed.maindata.freeSpaceOnDisk = 100;
+  assert.match(capacity.reason(relaxed, 1), /最小剩余空间/);
+  relaxed.maindata.freeSpaceOnDisk = 0;
+  relaxed.minFreeSpace = 0;
+  assert.match(capacity.reason(relaxed, 1), /当前剩余空间不足/);
+  relaxed.maindata.freeSpaceOnDisk = NaN;
+  assert.match(capacity.reason(relaxed, 1), /无法确认下载器剩余空间/);
+  relaxed.maindata.freeSpaceOnDisk = 800;
+  relaxed.capacityUpdatedAt = Date.now() - 121000;
+  assert.match(capacity.reason(relaxed, 1), /过期/);
+  relaxed.capacityUpdatedAt = Date.now();
+  const strictChoice = client({ _client: { capacityGuard: true } });
+  strictChoice.maindata.torrents = [{ hash: 'incomplete', size: 800, completed: 0 }];
+  const modeTask = { clientArr: [strictChoice.id, relaxed.id], clientSortBy: 'freeSpaceOnDisk' };
+  const modeClients = { [strictChoice.id]: strictChoice, [relaxed.id]: relaxed };
+  assert.equal(routing.select(modeTask, { size: 100 }, {}, modeClients).client, relaxed, 'routing sorts by the configured space calculation mode');
+  strictChoice._client.capacityGuard = false;
+  assert.equal(routing.select(modeTask, { size: 100 }, {}, modeClients).client, strictChoice, 'disabled space protection retains original raw free space sorting');
+  relaxedSlot.release();
+
   const moment = () => ({ unix: () => 1000 });
   const logger = { info () {}, debug () {}, error () {} };
   let release;
@@ -149,6 +184,9 @@ async function main () {
   assert.equal(ruleMod.normalize({ client: 'legacy', clientArr: [] }).client, undefined);
   assert.throws(() => ruleMod.normalize({ clientArr: 'invalid' }), /数组/);
   assert.throws(() => ruleMod.normalize({ priority: 'invalid' }), /数字/);
+  const ClientMod = load('app/model/ClientMod.js', { fs: {}, path: {}, '../common/Client': Client, '../libs/capacity': capacity, '../libs/util': {} });
+  assert.throws(() => new ClientMod().add({ capacityMode: 'invalid' }), /未知空间计算模式/);
+  assert.throws(() => new ClientMod().modify({ capacityMode: 'invalid' }), /未知空间计算模式/);
 
   let records = [];
   const torrent = { name: 'example', size: 100, hash: 'rss-test', link: 'link' };

@@ -18,11 +18,17 @@ function snapshot (client) {
   for (const [hash, entry] of entries) {
     if (entry.state !== 'sending' && hashes.has(hash)) { entries.delete(hash); releaseHash(client.id, hash); }
   }
-  const remaining = torrents.reduce((sum, t) => sum + Math.max(0, (+t.size || 0) - (+t.completed || 0)), 0);
-  const reserved = [...entries.values()].reduce((sum, entry) => sum + entry.size, 0);
+  const mode = client._client.capacityMode === 'relaxed' ? 'relaxed' : 'strict';
+  let free = Number(data.freeSpaceOnDisk);
+  if (mode === 'strict') {
+    const remaining = torrents.reduce((sum, t) => sum + Math.max(0, (+t.size || 0) - (+t.completed || 0)), 0);
+    const reserved = [...entries.values()].reduce((sum, entry) => sum + entry.size, 0);
+    free -= remaining + reserved;
+  }
   return {
+    mode,
     count: (+data.leechingCount || 0) + [...entries.values()].filter(entry => !entry.reseed).length,
-    free: Number(data.freeSpaceOnDisk) - remaining - reserved,
+    free,
     reserved: [...entries.values()].filter(entry => !entry.reseed).length,
     uncertain: [...entries.values()].filter(entry => entry.state === 'uncertain').length
   };
@@ -40,9 +46,11 @@ function reason (client, size = 0, options = {}) {
   if (client._client.capacityGuard) {
     const maxAge = Number(client._client.capacityMaxAge) || 120;
     if (!client.capacityUpdatedAt || Date.now() - client.capacityUpdatedAt > maxAge * 1000) return '下载器容量状态已过期，等待刷新';
-    if (!Number.isFinite(+size) || +size <= 0) return '无法确认种子大小，空间保护拒绝添加';
     if (!Number.isFinite(view.free)) return '无法确认下载器剩余空间';
-    if (view.free - size < (client.minFreeSpace || 0)) return '预计剩余空间不足（已计入未完成下载和预占）';
+    if (view.mode === 'strict') {
+      if (!Number.isFinite(+size) || +size <= 0) return '无法确认种子大小，空间保护拒绝添加';
+      if (view.free - size < (client.minFreeSpace || 0)) return '预计剩余空间不足（已计入未完成下载和预占）';
+    } else if (view.free <= (client.minFreeSpace || 0)) return '当前剩余空间不足（宽松模式仅检查实际剩余空间）';
   }
   return '';
 }

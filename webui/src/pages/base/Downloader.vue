@@ -243,9 +243,16 @@
             </template>
           </a-input>
         </a-form-item>
-        <a-form-item label="预计空间保护" name="capacityGuard"
-          extra="启用后计入未完成下载与添加预占，并保留最小剩余空间；大小未知或状态过期时拒绝普通下载。共享磁盘的不同下载器仍需分别预留空间。">
-          <a-checkbox v-model:checked="downloader.capacityGuard">启用预计空间保护</a-checkbox>
+        <a-form-item label="空间保护" name="capacityGuard"
+          extra="启用后按所选模式检查空间；状态过期时等待刷新。关闭后不应用空间计算模式，仅保留原最小剩余空间检查。">
+          <a-checkbox v-model:checked="downloader.capacityGuard">启用空间保护</a-checkbox>
+        </a-form-item>
+        <a-form-item v-if="downloader.capacityGuard" label="空间计算模式" name="capacityMode"
+          extra="严格模式扣除未完成下载、待确认添加及新种子的未来占用；宽松模式只看下载器报告的当前剩余空间，不为未来下载预留空间。">
+          <a-select v-model:value="downloader.capacityMode">
+            <a-select-option value="strict">严格模式</a-select-option>
+            <a-select-option value="relaxed">宽松模式</a-select-option>
+          </a-select>
         </a-form-item>
         <a-form-item v-if="downloader.capacityGuard" label="状态有效期（秒）" name="capacityMaxAge"
           extra="默认 120 秒，建议大于下载器轮询间隔。过期时等待刷新后再分配。">
@@ -422,10 +429,10 @@ export default {
       }
     },
     modifyClick (row) {
-      this.downloader = { ...row };
+      this.downloader = { ...row, capacityMode: row.capacityMode || 'strict' };
     },
     cloneClick (row) {
-      this.downloader = { ...row, deleteRules: [...row.deleteRules] };
+      this.downloader = { ...row, capacityMode: row.capacityMode || 'strict', deleteRules: [...row.deleteRules] };
       this.downloader.id = null;
       this.downloader.alias = this.downloader.alias + '-克隆';
     },
@@ -461,6 +468,7 @@ export default {
     clearDownloader () {
       this.downloader = {
         ...this.defaultDownloader,
+        capacityMode: 'strict',
         deleteRules: []
       };
     }

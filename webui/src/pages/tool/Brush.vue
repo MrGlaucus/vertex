@@ -12,6 +12,7 @@
             <template v-if="column.key === 'status'">{{ record.status ? '在线' : '离线' }}</template>
             <template v-if="column.key === 'capacity'">{{ record.capacity.count }} / 预占 {{ record.capacity.reserved }} / 待核实 {{ record.capacity.uncertain }}</template>
             <template v-if="column.key === 'space'">{{ bytes(record.capacity.free) }}</template>
+            <template v-if="column.key === 'mode'">{{ record.capacity.mode === 'relaxed' ? '宽松' : '严格' }}</template>
             <template v-if="column.key === 'speed'">↑ {{ bytes(record.uploadSpeed) }}/s ↓ {{ bytes(record.downloadSpeed) }}/s</template>
             <template v-if="column.key === 'time'">{{ time(record.updatedAt) }}</template>
           </template>
@@ -104,7 +105,7 @@ export default {
       states: { sending: '请求中', accepted: '已接受待确认', uncertain: '结果待核实', failed: '等待重试', verifying: '校验中', verificationFailed: '校验失败，已暂停', tags: '标签确认中', done: '完成', stopped: '已停止' },
       outcomes: { retryScheduled: '已安排重试', retryStarted: '开始重试', retrySucceeded: '重试成功', retryExhausted: '重试次数耗尽', retryDeferred: '等待核实后重试', retryStopped: '已停止重试', accepted: '添加已接受', reseedAccepted: '辅种已接受', reseedConfirmed: '辅种已确认', reseedMiss: '辅种未命中', reseedError: '辅种错误', rejected: '分配拒绝', failed: '添加失败', uncertain: '添加结果未知', deleted: '已删种', controlled: '已暂停或限速', waitExpired: '等待已过期' },
       retryColumns: [column('种子', 'name'), column('RSS', 'rss'), column('下载器', 'client'), column('状态', 'state'), column('已重试次数', 'attempts'), column('下次重试', 'next'), column('说明', 'error'), column('操作', 'actions')],
-      clientColumns: [column('下载器', 'alias'), column('状态', 'status'), column('下载任务', 'capacity'), column('预计可用空间', 'space'), column('速度', 'speed'), column('状态时间', 'time')],
+      clientColumns: [column('下载器', 'alias'), column('状态', 'status'), column('下载任务', 'capacity'), column('空间计算模式', 'mode'), column('可用空间（按模式）', 'space'), column('速度', 'speed'), column('状态时间', 'time')],
       jobColumns: [column('种子', 'name'), column('下载器', 'client'), column('RSS', 'rss'), column('模式', 'mode'), column('状态', 'state'), column('添加次数', 'attempts'), column('下次处理', 'next'), column('说明', 'error'), column('操作', 'actions')],
       waitColumns: [column('种子', 'name'), column('RSS', 'rss'), column('过期时间', 'expiry'), column('操作', 'actions')],
       deleteColumns: [column('种子', 'name'), column('命中规则', 'rule'), column('操作', 'action'), column('文件保护原因', 'protectedBy')],

@@ -4,8 +4,12 @@ const Client = require('../common/Client');
 const capacity = require('../libs/capacity');
 
 const util = require('../libs/util');
+function validate (options) {
+  if (options.capacityMode !== undefined && !['strict', 'relaxed'].includes(options.capacityMode)) throw new Error('未知空间计算模式');
+}
 class ClientMod {
   add (options) {
+    validate(options);
     const id = util.uuid.v4().split('-')[0];
     const clientSet = { ...options };
     clientSet.id = id;
@@ -25,6 +29,7 @@ class ClientMod {
   };
 
   modify (options) {
+    validate(options);
     const clientSet = { ...options };
     clientSet.deleteRules = clientSet.deleteRules || [];
     clientSet.sameServerClients = clientSet.sameServerClients || [];
@@ -40,6 +45,7 @@ class ClientMod {
     const clientList = util.listClient();
     const watchList = util.listWatch();
     for (const client of clientList) {
+      client.capacityMode = client.capacityMode || 'strict';
       client.used = !global.ignoreDependCheck && (rssList.some(item => (item.clientArr || [item.client]).indexOf(client.id) !== -1) ||
         rssList.some(item => (item.reseedClients || []).indexOf(client.id) !== -1) ||
         doubanList.some(item => item.client === client.id) ||

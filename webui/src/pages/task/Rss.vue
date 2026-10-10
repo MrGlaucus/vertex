@@ -83,6 +83,7 @@
         <a-form-item
           label="排序规则"
           name="clientSortBy"
+          extra="按剩余空间排序时，已启用空间保护的下载器使用其严格或宽松模式计算值；未启用时使用当前磁盘剩余空间。"
           :rules="[{ required: true, message: '${label}不可为空! ' }]">
           <a-select size="small" v-model:value="rss.clientSortBy">
             <a-select-option value="leechingCount">下载种子数量</a-select-option>
