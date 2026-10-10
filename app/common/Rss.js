@@ -13,6 +13,7 @@ const routing = require('../libs/rss-routing');
 const autoReseed = require('../libs/auto-reseed');
 const recovery = require('../libs/brush-recovery');
 const store = require('../libs/brush-store');
+const rssRetry = require('../libs/rss-retry');
 
 class Rss {
   constructor (rss) {
@@ -300,7 +301,7 @@ class Rss {
             }
           }
         }
-        const sameTorrent = await util.getRecord('select * from torrents where size = ? and add_time > ?', [torrent.size, moment().unix() - 1200]);
+        const sameTorrent = await util.getRecord('select * from torrents where size = ? and add_time > ? and record_type = 1', [torrent.size, moment().unix() - 1200]);
         if (sameTorrent && sameTorrent.id) {
           await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
             [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, '拒绝原因: 跳过同大小种子']);
@@ -333,6 +334,7 @@ class Rss {
           await client.addTorrent(downloadUrl, torrent.hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused, { size: torrent.size, maxCount: this.maxClientDownloadCount, rssId: this.id, feedHash: torrent.hash, name: torrent.name, ruleId: fitRule.id, ruleAlias: fitRule.alias });
         }
         accepted = true;
+        rssRetry.success(this.id, torrent.hash);
         this.addCount += 1;
         try {
           await this.ntf.addTorrent(this._rss, client, torrent);
@@ -351,6 +353,7 @@ class Rss {
           return;
         }
         logger.error(this.alias, '下载器', client.alias, '添加种子失败:', error.message);
+        if (error.code !== 'CAPACITY_REJECTED') rssRetry.fail(this.id, torrent, client.id, error);
         await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
           [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), error.code === 'CAPACITY_REJECTED' ? 2 : 3, '添加未完成: ' + error.message]);
         try {
@@ -362,29 +365,31 @@ class Rss {
     }
   }
 
-  async rss (_torrents) {
+  async rss (_torrents, retryOnly = false) {
     if (this.processing || this.stopped) return;
     this.processing = true;
     try {
-      await this._runRss(_torrents);
+      await this._runRss(_torrents, retryOnly);
     } finally {
       this.processing = false;
     }
   }
 
-  async _runRss (_torrents) {
+  async _runRss (_torrents, retryOnly = false) {
     let torrents = [];
     if (_torrents) {
       torrents = _torrents;
     } else {
       torrents = (await Promise.all(this.urls.map(url => rss.getTorrents(url)))).flat();
     }
-    torrents = [...new Map([...torrents, ...autoReseed.waiting(this.id)].map(t => [t.hash, t])).values()];
+    torrents = [...new Map([...torrents, ...(retryOnly ? [] : autoReseed.waiting(this.id))].map(t => [t.hash, t])).values()];
     for (const torrent of torrents) {
       if (this.stopped) return;
+      const queued = rssRetry.get(this.id, torrent.hash);
+      if (queued && !retryOnly) continue;
       const sqlRes = await util.getRecord('SELECT * FROM torrents WHERE hash = ? AND rss_id = ?', [torrent.hash, this.id]);
       const oldJob = recovery.forFeed(this.id, torrent.hash);
-      const retry = oldJob && oldJob.state === 'failed' && oldJob.attempts < 5 && oldJob.nextAt <= Date.now();
+      const retry = retryOnly || (oldJob && oldJob.state === 'failed' && oldJob.checkedFailure && oldJob.attempts < 6 && oldJob.nextAt <= Date.now());
       if (oldJob && !retry) continue;
       if (sqlRes && sqlRes.id && !retry) continue;
       if (torrent.name.indexOf('[FROZEN]') !== -1) continue;
@@ -394,7 +399,7 @@ class Rss {
         await this.ntf.rejectTorrent(this._rss, undefined, torrent, `拒绝原因: 达到单小时推送上限: ${this.addCount} / ${this.addCountPerHour}`);
         return;
       }
-      if (moment().unix() - this.lastRssTime > +this.maxSleepTime) {
+      if (!retryOnly && moment().unix() - this.lastRssTime > +this.maxSleepTime) {
         await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
           [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, '拒绝原因: 最长休眠时间']);
         await this.ntf.rejectTorrent(this._rss, undefined, torrent, '拒绝原因: 最长休眠时间');
@@ -416,10 +421,15 @@ class Rss {
         const matches = this.acceptRules.find(rule => this._fitRule(rule, torrent));
         if (!this._rss.reseedRespectRules || matches || !this.acceptRules.length) {
           try {
-            if (await autoReseed.attempt(this, torrent, matches)) continue;
+            if (await autoReseed.attempt(this, torrent, matches)) {
+              const job = recovery.forFeed(this.id, torrent.hash);
+              if (job && ['accepted', 'done', 'verifying', 'tags'].includes(job.state)) rssRetry.success(this.id, torrent.hash);
+              continue;
+            }
           } catch (error) {
             logger.error(this.alias, '辅种处理失败:', error.message);
             store.event({ rssId: this.id, hash: torrent.hash, name: torrent.name, outcome: 'reseedError', reason: recovery.safeError(error) });
+            if (error.code !== 'CAPACITY_REJECTED') rssRetry.fail(this.id, torrent, recovery.forFeed(this.id, torrent.hash)?.clientId, error);
             continue;
           }
         }
@@ -427,9 +437,11 @@ class Rss {
         const selection = fitRule || !this.acceptRules.length
           ? routing.select(this, torrent, fitRule, global.runningClient)
           : { reason: '不符合所有选择规则' };
-        if (retry && selection.client && selection.client.id !== oldJob.clientId) {
-          const allowed = selection.candidates.some(c => c.id === oldJob.clientId && !c.reason);
-          if (allowed) selection.client = global.runningClient[oldJob.clientId];
+        if (retry && oldJob?.reseed) continue;
+        const originalClient = oldJob?.clientId || queued?.clientId;
+        if (retry && originalClient && selection.client && selection.client.id !== originalClient) {
+          const allowed = selection.candidates.some(c => c.id === originalClient && !c.reason);
+          if (allowed) selection.client = global.runningClient[originalClient];
           else selection.reason = '恢复任务原下载器不符合当前规则或容量，不改投其他机器';
         }
         if (selection.reason) {
@@ -442,7 +454,7 @@ class Rss {
         await this._pushTorrent(torrent, selection.client, fitRule);
       }
     }
-    this.lastRssTime = moment().unix();
+    if (!retryOnly) this.lastRssTime = moment().unix();
   }
 
   async dryrun () {

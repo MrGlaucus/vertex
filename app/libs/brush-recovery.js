@@ -17,7 +17,7 @@ function save (job) {
 function begin (client, hash, request, admission = {}) {
   const id = jobId(client.id, hash);
   const old = store.get('job', id);
-  if (old && (!['failed', 'waiting'].includes(old.state) || old.attempts >= 5 || old.nextAt > Date.now())) throw new Error('添加任务尚未到重试时间或已停止，请查看刷流中心');
+  if (old && (!['failed', 'waiting'].includes(old.state) || old.attempts >= (admission.rssId ? 6 : 5) || old.nextAt > Date.now())) throw new Error('添加任务尚未到重试时间或已停止，请查看刷流中心');
   const job = { ...old, id, hash: String(hash).toLowerCase(), clientId: client.id, rssId: admission.rssId, feedHash: admission.feedHash || hash, name: admission.name || hash, link: admission.link, category: admission.category, ruleId: admission.ruleId, ruleAlias: admission.ruleAlias, request, reseed: admission.reseed, state: 'sending', recheckRequested: false, reseedConfirmed: false, resumed: false, targetObserved: false, httpAccepted: false, checkedFailure: false, attempts: (old ? old.attempts : 0) + 1, nextAt: Date.now() + 120000, createdAt: old ? old.createdAt : Date.now(), error: '' };
   save(job);
   active.add(id);
@@ -37,7 +37,7 @@ function failed (job, error, definite) {
   job.state = definite ? 'failed' : 'uncertain';
   job.checkedFailure = false;
   job.error = safeError(error);
-  job.nextAt = Date.now() + Math.min(3600000, 120000 * Math.pow(2, job.attempts - 1));
+  job.nextAt = Date.now() + (job.rssId ? 30000 : Math.min(3600000, 120000 * Math.pow(2, job.attempts - 1)));
   active.delete(job.id);
   save(job);
   store.event({ rssId: job.rssId, clientId: job.clientId, hash: job.hash, name: job.name, outcome: job.state, reason: job.error });
@@ -77,7 +77,7 @@ async function reconcile (job, client) {
     } else if (Date.now() >= job.nextAt) {
       capacity.releaseHash(client.id, job.hash);
       if (job.reseed) store.remove('relation', job.id);
-      job.state = job.attempts >= 5 ? 'stopped' : 'failed';
+      job.state = job.attempts >= (job.rssId ? 6 : 5) ? 'stopped' : 'failed';
       job.checkedFailure = true;
       job.error = '已实时查询原下载器，未找到种子；仅在重新满足当前规则时重试';
     }
@@ -192,6 +192,17 @@ async function action (id, operation) {
   try { return await performAction(id, operation); } finally { recovering.delete(id); }
 }
 
+async function checkRetry (id, client) {
+  if (active.has(id) || recovering.has(id)) throw new Error('添加任务正在核实，请稍后重试');
+  recovering.add(id);
+  try {
+    const job = store.get('job', id);
+    await reconcile(job, client);
+    await recordHistory(job);
+    return job;
+  } finally { recovering.delete(id); }
+}
+
 async function performAction (id, operation) {
   const job = store.get('job', id);
   if (!job || active.has(id)) throw new Error('任务不存在或请求正在执行');
@@ -221,14 +232,15 @@ async function performAction (id, operation) {
       if (job.reseedConfirmed) throw new Error('已确认辅种的目标种子消失，不允许重新下载');
       job.state = 'failed';
       job.attempts = 0;
-      job.error = '等待 RSS 再次出现且满足当前规则后重试';
+      job.error = '等待满足当前 RSS 规则后重试';
       if (!job.rssId) job.error = '已核实不存在并释放预占，请从原入口重新推送';
     }
     job.nextAt = Date.now();
     job.recoveryAttempts = 0;
   } else throw new Error('未知操作');
   save(job);
+  if (operation === 'retry' && job.rssId && job.state === 'failed') require('./rss-retry').restart(job.rssId, job.feedHash);
   return job;
 }
 
-module.exports = { begin, accepted, failed, lookup, completed, reconcile, tick, forFeed, action, jobId, save, safeError, recordHistory, setHistory: adapter => { history = adapter; }, end: id => active.delete(id) };
+module.exports = { begin, accepted, failed, lookup, completed, reconcile, checkRetry, tick, forFeed, action, jobId, save, safeError, recordHistory, setHistory: adapter => { history = adapter; }, end: id => active.delete(id) };

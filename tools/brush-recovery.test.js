@@ -39,10 +39,15 @@ async function main () {
       maindata: { torrents: [], leechingCount: 0, freeSpaceOnDisk: 10000 }
     };
     capacity.reserve(client, 'durable', 100).uncertain();
+    const retryQueue = require('../app/libs/rss-retry');
+    retryQueue.fail('persistent-rss', { hash: 'retry-persist', name: '持久化重试', url: 'private-url' }, client.id, new Error('timeout'));
+    const retryBefore = retryQueue.get('persistent-rss', 'retry-persist');
     database.close();
     database = openDatabase(filename);
     store.configure(database);
     assert.equal(capacity.snapshot({ ...client }).uncertain, 1, 'reservations survive a real SQLite connection restart');
+    assert.deepEqual(retryQueue.get('persistent-rss', 'retry-persist'), retryBefore, 'retry payload, count and deadline survive a real SQLite restart');
+    assert.equal(store.list('event').some(e => e.hash === 'retry-persist' && e.outcome === 'retryScheduled'), true, 'retry logs survive restart');
     capacity.releaseHash(client.id, 'durable');
     assert.throws(() => store.transaction(() => {
       capacity.reserve(client, 'rollback-slot', 100);

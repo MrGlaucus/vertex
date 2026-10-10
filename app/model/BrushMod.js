@@ -56,6 +56,7 @@ class BrushMod {
         id: job.id, hash: job.hash, name: job.name, client: clientAlias(job.clientId), rss: rssAlias(job.rssId), state: job.state, attempts: job.attempts, recoveryAttempts: job.recoveryAttempts || 0, nextAt: job.nextAt, error: job.error, mode: job.reseed?.mode || '普通下载', updatedAt: job.updatedAt
       })),
       events: store.list('event').sort((a, b) => b.time - a.time).slice(0, 200).map(e => ({ ...e, rss: rssAlias(e.rssId), client: clientAlias(e.clientId) })),
+      retries: store.list('rss-retry').sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 500).map(entry => ({ id: entry.id, name: entry.torrent.name, rss: rssAlias(entry.rssId), client: clientAlias(entry.clientId), state: entry.state, attempts: entry.attempts, nextAt: entry.state === 'waiting' ? entry.nextAt : null, error: entry.error })),
       waiting: store.list('wait').map(w => ({ id: w.id, name: w.torrent.name, rss: rssAlias(w.rssId), expiresAt: w.expiresAt })),
       rules: Object.values(rules),
       history: history.map(row => ({ ...row, alias: rssAlias(row.rss_id) })),
@@ -64,6 +65,10 @@ class BrushMod {
   }
 
   async action (options) {
+    if (options.operation === 'stopRetry') {
+      require('../libs/rss-retry').stop(options.id);
+      return '操作完成';
+    }
     if (options.operation === 'cancelWait') {
       if (!store.get('wait', options.id)) throw new Error('等待任务不存在');
       store.remove('wait', options.id);

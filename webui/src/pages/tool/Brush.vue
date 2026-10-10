@@ -18,7 +18,7 @@
         </a-table>
       </a-tab-pane>
       <a-tab-pane key="jobs" tab="添加与恢复">
-        <a-alert type="info" show-icon message="重试会先实时核实原下载器；RSS 任务仍需重新出现并满足当前规则。停止恢复不会撤回已发出的请求。" style="margin-bottom: 12px;" />
+        <a-alert type="info" show-icon message="RSS 添加失败后每 30 秒自动重试，最多重试 5 次；条目离开 RSS 后仍可重试。重试前核实原下载器并检查当前规则。停止恢复不会撤回已发出的请求。" style="margin-bottom: 12px;" />
         <a-input v-model:value="search" placeholder="按名称、下载器、RSS 或状态筛选" style="margin-bottom: 12px;" />
         <a-table :columns="jobColumns" :data-source="filteredJobs" row-key="id" size="small" :scroll="{ x: 1200 }">
           <template #bodyCell="{ column, record }">
@@ -27,6 +27,16 @@
             <template v-if="column.key === 'actions'">
               <a-space><a-button size="small" :disabled="record.state === 'done'" @click="action(record.id, record.state === 'verificationFailed' ? 'recheck' : 'retry')">{{ record.state === 'verificationFailed' ? '重新校验' : '核实 / 重试' }}</a-button><a-button size="small" :disabled="['done', 'stopped'].includes(record.state)" @click="action(record.id, 'stop')">停止恢复</a-button></a-space>
             </template>
+          </template>
+        </a-table>
+      </a-tab-pane>
+      <a-tab-pane key="retries" tab="RSS 自动重试">
+        <a-alert type="info" message="首次失败后最多重试 5 次，每次间隔 30 秒。下载器离线或结果无法核实时等待；当前规则不允许添加时停止。详细过程见执行记录。" style="margin-bottom: 12px;" />
+        <a-table :data-source="data.retries" :columns="retryColumns" row-key="id" :scroll="{ x: 1000 }">
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'state'">{{ retryStates[record.state] || record.state }}</template>
+            <template v-if="column.key === 'next'">{{ time(record.nextAt) }}</template>
+            <template v-if="column.key === 'actions'"><a-button size="small" :disabled="record.state !== 'waiting'" @click="action(record.id, 'stopRetry')">停止重试</a-button></template>
           </template>
         </a-table>
       </a-tab-pane>
@@ -72,6 +82,7 @@
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'time'">{{ time(record.time) }}</template>
             <template v-if="column.key === 'outcome'">{{ outcomes[record.outcome] || record.outcome }}</template>
+            <template v-if="column.key === 'next'">{{ time(record.nextAt) }}</template>
           </template>
         </a-table>
       </a-tab-pane>
@@ -88,9 +99,11 @@ export default {
       search: '',
       previewClient: undefined,
       preview: { items: [] },
-      data: { clients: [], jobs: [], events: [], rules: [], history: [], waiting: [], traffic: [] },
+      data: { clients: [], jobs: [], events: [], retries: [], rules: [], history: [], waiting: [], traffic: [] },
+      retryStates: { waiting: '等待重试', done: '成功', exhausted: '重试 5 次失败，已放弃', stopped: '已停止' },
       states: { sending: '请求中', accepted: '已接受待确认', uncertain: '结果待核实', failed: '等待重试', verifying: '校验中', verificationFailed: '校验失败，已暂停', tags: '标签确认中', done: '完成', stopped: '已停止' },
-      outcomes: { accepted: '添加已接受', reseedAccepted: '辅种已接受', reseedConfirmed: '辅种已确认', reseedMiss: '辅种未命中', reseedError: '辅种错误', rejected: '分配拒绝', failed: '添加失败', uncertain: '添加结果未知', deleted: '已删种', controlled: '已暂停或限速', waitExpired: '等待已过期' },
+      outcomes: { retryScheduled: '已安排重试', retryStarted: '开始重试', retrySucceeded: '重试成功', retryExhausted: '重试次数耗尽', retryDeferred: '等待核实后重试', retryStopped: '已停止重试', accepted: '添加已接受', reseedAccepted: '辅种已接受', reseedConfirmed: '辅种已确认', reseedMiss: '辅种未命中', reseedError: '辅种错误', rejected: '分配拒绝', failed: '添加失败', uncertain: '添加结果未知', deleted: '已删种', controlled: '已暂停或限速', waitExpired: '等待已过期' },
+      retryColumns: [column('种子', 'name'), column('RSS', 'rss'), column('下载器', 'client'), column('状态', 'state'), column('已重试次数', 'attempts'), column('下次重试', 'next'), column('说明', 'error'), column('操作', 'actions')],
       clientColumns: [column('下载器', 'alias'), column('状态', 'status'), column('下载任务', 'capacity'), column('预计可用空间', 'space'), column('速度', 'speed'), column('状态时间', 'time')],
       jobColumns: [column('种子', 'name'), column('下载器', 'client'), column('RSS', 'rss'), column('模式', 'mode'), column('状态', 'state'), column('添加次数', 'attempts'), column('下次处理', 'next'), column('说明', 'error'), column('操作', 'actions')],
       waitColumns: [column('种子', 'name'), column('RSS', 'rss'), column('过期时间', 'expiry'), column('操作', 'actions')],
@@ -98,7 +111,7 @@ export default {
       ruleColumns: [column('规则', 'alias'), column('已接受', 'accepted'), column('已确认辅种', 'reseed'), column('上传量', 'upload'), column('下载量', 'download'), column('种子容量', 'size'), column('上传 / 容量', 'yield')],
       historyColumns: [column('RSS 历史', 'alias'), column('记录数', 'records'), column('拒绝数', 'rejected'), column('记录上传量', 'upload'), column('记录下载量', 'download')],
       trafficColumns: [column('下载器', 'client'), column('站点', 'tracker'), column('种子数', 'count'), column('上传量', 'upload'), column('下载量', 'download'), column('种子容量', 'size'), column('上传 / 容量', 'yield')],
-      eventColumns: [column('时间', 'time'), column('种子', 'name'), column('RSS', 'rss'), column('下载器', 'client'), column('结果', 'outcome'), column('原因', 'reason')]
+      eventColumns: [column('时间', 'time'), column('种子', 'name'), column('RSS', 'rss'), column('下载器', 'client'), column('结果', 'outcome'), column('重试序号', 'retryAttempt'), column('下次重试', 'next'), column('原因', 'reason')]
     };
   },
   computed: {

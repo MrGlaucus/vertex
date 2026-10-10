@@ -166,6 +166,7 @@ async function main () {
     './Push': {},
     '../libs/rss-routing': routing,
     '../libs/auto-reseed': { attempt: async () => false, waiting: () => [] },
+    '../libs/rss-retry': require('../app/libs/rss-retry'),
     '../libs/brush-recovery': require('../app/libs/brush-recovery'),
     '../libs/brush-store': require('../app/libs/brush-store')
   });
@@ -216,6 +217,109 @@ async function main () {
     await Rss.prototype._pushTorrent.call(rss, { ...torrent, hash: 'fakehash-123', url: 'url' }, b, {});
     assert.equal(sent[1], 'real-hash', 'synthetic RSS hashes must resolve before reserving');
     assert.equal(sent[9].size, 110, 'file metadata size used for final admission');
+    const retryQueue = require('../app/libs/rss-retry');
+    const retryStore = require('../app/libs/brush-store');
+    const savedRss = global.runningRss;
+    const realNow = Date.now;
+    let clock = realNow();
+    Date.now = () => clock;
+    try {
+      let adds = 0;
+      let lookups = 0;
+      let target;
+      const retryClient = Object.assign(Object.create(Client.prototype), client({ _client: { type: 'qBittorrent' } }), {
+        login () {},
+        client: {
+          getTorrent: async () => { lookups++; return target; },
+          addTorrent: async () => { adds++; return { statusCode: 400 }; }
+        }
+      });
+      global.runningClient[retryClient.id] = retryClient;
+      const retryTask = Object.assign(Object.create(Rss.prototype), rss, {
+        id: 'retry-task',
+        clientArr: [retryClient.id],
+        acceptRules: [],
+        _pushTorrent: Rss.prototype._pushTorrent,
+        ntf: { addTorrent: async () => {}, addTorrentError: async () => {}, rejectTorrent: async () => {} }
+      });
+      global.runningRss = { [retryTask.id]: retryTask };
+      const retryTorrent = { ...torrent, hash: 'retry-five', url: 'url' };
+      await retryTask.rss([retryTorrent]);
+      assert.equal(adds, 1);
+      assert.equal(retryQueue.get(retryTask.id, retryTorrent.hash).nextAt, clock + 30000);
+      clock += 29999;
+      await retryQueue.tick();
+      assert.equal(adds, 1, 'never retry before 30 seconds');
+      clock++;
+      for (let i = 1; i <= 5; i++) {
+        await retryQueue.tick();
+        assert.equal(adds, i + 1, 'exactly one request per retry');
+        clock += 30000;
+      }
+      await retryQueue.tick();
+      await retryTask.rss([retryTorrent]);
+      assert.equal(adds, 6, 'five retries after the first failure, then permanently give up');
+      assert.equal(lookups, 5, 'fresh original downloader lookup before every retry');
+      assert.equal(retryQueue.get(retryTask.id, retryTorrent.hash).state, 'exhausted');
+      const logs = retryStore.list('event').filter(e => e.hash === retryTorrent.hash);
+      assert.equal(logs.filter(e => e.outcome === 'retryStarted').length, 5);
+      assert.equal(logs.filter(e => e.outcome === 'retryExhausted').length, 1);
+
+      const late = { ...retryTorrent, hash: 'timeout-late' };
+      retryClient.client.addTorrent = async () => { adds++; throw new Error('timeout https://secret.example/passkey'); };
+      await retryTask.rss([late]);
+      const before = adds;
+      assert.equal(retryQueue.get(retryTask.id, late.hash).error.includes('secret.example'), false);
+      target = { hash: late.hash, size: 100 };
+      clock += 30000;
+      await Promise.all([retryQueue.tick(), retryQueue.tick()]);
+      assert.equal(adds, before, 'late accepted timeout must never be sent again');
+      assert.equal(retryQueue.get(retryTask.id, late.hash).state, 'done');
+      target = undefined;
+
+      const eventual = { ...retryTorrent, hash: 'retry-success' };
+      await retryTask.rss([eventual]);
+      retryClient.client.addTorrent = async () => { adds++; return { statusCode: 200 }; };
+      clock += 30000;
+      await retryQueue.tick();
+      assert.equal(retryQueue.get(retryTask.id, eventual.hash).state, 'done', 'successful retry closes the queue');
+      const acceptedAdds = adds;
+      clock += 30000;
+      await retryQueue.tick();
+      assert.equal(adds, acceptedAdds, 'successful retry does not run again');
+
+      const blocked = { ...retryTorrent, hash: 'retry-rejected' };
+      retryQueue.fail(retryTask.id, blocked, retryClient.id, new Error('metadata failure'));
+      retryTask.rejectRules = [{ alias: '新增拒绝规则' }];
+      clock += 30000;
+      await retryQueue.tick();
+      assert.equal(adds, acceptedAdds, 'current reject rules prevent any add request');
+      assert.equal(retryQueue.get(retryTask.id, blocked.hash).state, 'stopped');
+      retryTask.rejectRules = [];
+
+      const metadataFailure = { ...retryTorrent, hash: 'fakehash-retry-metadata' };
+      let downloads = 0;
+      retryTask._downloadTorrent = async () => { downloads++; throw new Error('metadata unavailable'); };
+      await retryTask.rss([metadataFailure]);
+      clock += 30000;
+      retryTask.stopped = true;
+      await retryQueue.tick();
+      assert.equal(downloads, 1, 'disabled RSS never retries');
+      retryTask.stopped = false;
+      retryClient.status = false;
+      await retryQueue.tick();
+      assert.equal(downloads, 1, 'offline downloader waits without consuming a retry');
+      retryClient.status = true;
+      await retryQueue.tick();
+      assert.equal(downloads, 2, 'metadata failures retry without needing the RSS item to reappear');
+      retryQueue.stop(retryQueue.get(retryTask.id, metadataFailure.hash).id);
+      clock += 30000;
+      await retryQueue.tick();
+      assert.equal(downloads, 2, 'manual stop survives subsequent ticks');
+    } finally {
+      Date.now = realNow;
+      global.runningRss = savedRss;
+    }
     let finish;
     let runs = 0;
     rss._runRss = async () => { runs++; await new Promise(resolve => { finish = resolve; }); };

@@ -151,6 +151,7 @@ const init = function () {
     }
   }
   global.brushRecoveryJob = cron.schedule('* * * * *', () => require('./libs/brush-recovery').tick().catch(error => logger.error('刷流恢复失败:', error)));
+  global.rssRetryJob = cron.schedule('*/5 * * * * *', () => require('./libs/rss-retry').tick().catch(error => logger.error('RSS 重试失败:', error)));
   // cookiecloud
   util.initCookieCloud();
 };
