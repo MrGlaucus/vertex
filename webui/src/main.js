@@ -3,7 +3,7 @@ import moment from 'moment';
 import 'less';
 import { createApp, ref, defineComponent } from 'vue';
 import {
-  Button, Form, Input, Message, Menu, Layout,
+  Button, Form, Input, InputNumber, Message, Menu, Layout,
   Drawer, Table, Divider, Descriptions, Col, Row, Tag,
   Checkbox, Select, Dropdown, Switch, Upload, Modal,
   Radio, Popover, Tree, Alert, notification as Notification,
@@ -53,7 +53,7 @@ use([
 
 const app = createApp(App);
 const components = [
-  Button, Form, Input, Menu, Layout, Drawer,
+  Button, Form, Input, InputNumber, Menu, Layout, Drawer,
   Table, Divider, Descriptions, Col, Row, Tag,
   Checkbox, Select, Dropdown, Switch, Upload, Modal,
   Radio, Popover, Tree, Alert, Space
