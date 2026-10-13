@@ -383,6 +383,7 @@ class Rss {
       torrents = (await Promise.all(this.urls.map(url => rss.getTorrents(url)))).flat();
     }
     torrents = [...new Map([...torrents, ...(retryOnly ? [] : autoReseed.waiting(this.id))].map(t => [t.hash, t])).values()];
+    await routing.refresh(this, global.runningClient);
     for (const torrent of torrents) {
       if (this.stopped) return;
       const queued = rssRetry.get(this.id, torrent.hash);
@@ -445,6 +446,7 @@ class Rss {
           else selection.reason = '恢复任务原下载器不符合当前规则或容量，不改投其他机器';
         }
         if (selection.reason) {
+          if (selection.temporary) rssRetry.fail(this.id, torrent, originalClient, new Error(selection.reason));
           store.event({ rssId: this.id, hash: torrent.hash, name: torrent.name, outcome: 'rejected', reason: selection.reason });
           await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
             [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, '拒绝原因: ' + selection.reason]);

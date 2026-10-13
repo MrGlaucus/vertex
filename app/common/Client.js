@@ -237,17 +237,28 @@ class Client {
   };
 
   async login (notify = true) {
+    if (this.loginPromise) return this.loginPromise;
+    this.loginPromise = this._login(notify);
+    try { return await this.loginPromise; } finally { this.loginPromise = null; }
+  }
+
+  async _login (notify) {
     try {
-      this.cookie = await this.client.login(this.username, this.clientUrl, this.password);
+      const cookie = await this.client.login(this.username, this.clientUrl, this.password);
+      if (this.stopped) return;
+      if (!cookie) throw new Error('登录未返回有效会话');
+      this.cookie = cookie;
       this.status = true;
       this.errorCount = 0;
       this.lastCookie = moment().unix();
       logger.info('下载器', this.alias, '登录成功');
     } catch (error) {
       logger.error('下载器', this.alias, '登录失败\n', error);
-      await this.ntf.clientLoginError(this._client, error.message);
+      this.lastStateError = recovery.safeError(error);
       this.status = false;
       this.maindata = null;
+      this.cookie = null;
+      try { await this.ntf.clientLoginError(this._client, error.message); } catch (notificationError) { logger.error('下载器登录通知失败:', notificationError); }
       return;
     }
     try {
@@ -263,18 +274,26 @@ class Client {
   };
 
   async getMaindata () {
-    if (!this.cookie) {
-      this.login();
-      return;
-    }
-    if (this.lastCookie < moment().unix() - 3000) {
-      this.login(false);
-      return;
-    }
+    if (this.maindataPromise) return this.maindataPromise;
+    this.maindataPromise = this._getMaindata();
+    try { return await this.maindataPromise; } finally { this.maindataPromise = null; }
+  }
+
+  async ensureAvailable () {
+    if (this.stopped) return false;
+    if (capacity.isUnavailable(this)) await this.getMaindata();
+    return !this.stopped && !capacity.isUnavailable(this);
+  }
+
+  async _getMaindata () {
+    if (this.stopped) return;
+    if (!this.cookie || this.lastCookie < moment().unix() - 3000) await this.login(!this.cookie);
+    if (!this.cookie || this.stopped) return;
     const statusLeeching = ['downloading', 'stalledDL', 'Downloading'];
     const statusSeeding = ['uploading', 'stalledUP', 'Seeding'];
     try {
       const maindata = await this.client.getMaindata(this.clientUrl, this.cookie);
+      if (this.stopped) return;
       if (typeof maindata === 'string') {
         this.cookie.sessionId = maindata;
         return;
@@ -315,14 +334,17 @@ class Client {
       */
       logger.debug('下载器', this.alias, '获取种子信息成功');
       this.status = true;
+      this.lastStateError = '';
       this.errorCount = 0;
     } catch (error) {
+      if (this.stopped) return;
       logger.error('下载器', this.alias, '获取种子信息失败\n', error);
       this.status = false;
+      this.lastStateError = recovery.safeError(error);
       this.maindata = null;
       this.errorCount += 1;
       if (this.errorCount > 5) {
-        await this.ntf.getMaindataError(this._client);
+        try { await this.ntf.getMaindataError(this._client); } catch (notificationError) { logger.error('下载器状态通知失败:', notificationError); }
         await this.login();
       }
     }
@@ -339,6 +361,7 @@ class Client {
   };
 
   async _managedAdd (request, admission) {
+    await this.ensureAvailable();
     if (admission.reseed && !admission.locked) return requestLimit.run('data:' + this.id, 1, () => this._managedAdd(request, { ...admission, locked: true }));
     if (admission.reseed) {
       if (store.get('deletion', this.id + ':' + admission.reseed.sourceHash)) throw new Error('辅种原种正在删除');

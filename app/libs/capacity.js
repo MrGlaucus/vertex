@@ -34,8 +34,13 @@ function snapshot (client) {
   };
 }
 
+function isUnavailable (client) {
+  return !!client && !client.stopped && (!client.status || !client.maindata || (client._client.capacityGuard && (!client.capacityUpdatedAt || Date.now() - client.capacityUpdatedAt > (Number(client._client.capacityMaxAge) || 120) * 1000)));
+}
+
 function reason (client, size = 0, options = {}) {
-  if (!client || !client.status || !client.maindata) return '下载器未启动或状态不可用';
+  if (!client || client.stopped) return '下载器未启用或已停止';
+  if (!client.status || !client.maindata) return client.lastStateError ? '下载器状态读取失败: ' + client.lastStateError : '下载器状态尚未就绪（等待登录或种子列表）';
   const view = snapshot(client);
   if (options.hash && (pending(client).has(keyOf(options.hash)) || (client.maindata.torrents || []).some(t => keyOf(t.hash) === keyOf(options.hash)))) return '种子已存在或正在添加，等待下载器确认';
   if (client._client.maxTorrentNum > 0 && (client.maindata.torrents || []).length + pending(client).size >= client._client.maxTorrentNum) return '达到下载器总种子数量上限';
@@ -59,7 +64,7 @@ function reserve (client, hash, size, options = {}) {
   const error = reason(client, size, { ...options, hash });
   if (error) {
     const rejection = new Error(error);
-    rejection.code = 'CAPACITY_REJECTED';
+    rejection.code = isUnavailable(client) ? 'CAPACITY_UNAVAILABLE' : 'CAPACITY_REJECTED';
     throw rejection;
   }
   const key = keyOf(hash);
@@ -74,4 +79,4 @@ function reserve (client, hash, size, options = {}) {
   };
 }
 
-module.exports = { snapshot, reason, reserve, releaseHash };
+module.exports = { snapshot, reason, reserve, releaseHash, isUnavailable };

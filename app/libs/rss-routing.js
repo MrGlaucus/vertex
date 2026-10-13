@@ -6,6 +6,14 @@ function orderedRules (rules, ids, order = 'configured') {
     .sort((a, b) => order === 'legacy' ? +b.priority - +a.priority : (Number(b.priority) || 0) - (Number(a.priority) || 0));
 }
 
+async function refresh (task, clients = {}) {
+  const ids = [...(task.clientArr || []), ...(task.reseedClients || []), ...(task.acceptRules || []).flatMap(rule => rule.client ? [rule.client] : rule.clientArr || [])];
+  await Promise.all([...new Set(ids)].map(async id => {
+    const client = clients[id];
+    if (client?.ensureAvailable && capacity.isUnavailable(client)) await client.ensureAvailable();
+  }));
+}
+
 function select (task, torrent, rule = {}, clients = {}) {
   const group = !rule.client && Array.isArray(rule.clientArr) && rule.clientArr.length > 0;
   // Legacy single-downloader overrides remain usable without task membership.
@@ -20,7 +28,7 @@ function select (task, torrent, rule = {}, clients = {}) {
       if ((task.maxClientUploadSpeed > 0 && client.avgUploadSpeed >= task.maxClientUploadSpeed) || (client.maxUploadSpeed > 0 && upload >= client.maxUploadSpeed)) reason = '达到上传速度上限';
       if ((task.maxClientDownloadSpeed > 0 && client.avgDownloadSpeed >= task.maxClientDownloadSpeed) || (client.maxDownloadSpeed > 0 && download >= client.maxDownloadSpeed)) reason = '达到下载速度上限';
     }
-    return { id, alias: client ? client.alias : id, reason };
+    return { id, alias: client ? client.alias : id, reason, temporary: !!reason && capacity.isUnavailable(client) };
   });
   const available = candidates.filter(c => !c.reason).map(c => clients[c.id]);
   const metric = client => {
@@ -33,8 +41,9 @@ function select (task, torrent, rule = {}, clients = {}) {
   return {
     client: available[0],
     candidates,
+    temporary: !available.length && candidates.some(c => c.temporary),
     reason: available.length ? '' : (group ? '规则下载器组无可用机器，不回退组外' : '无可用下载器') + (candidates.length ? ': ' + candidates.map(c => `${c.alias}: ${c.reason}`).join('; ') : '（请检查规则组与 RSS 下载器列表）')
   };
 }
 
-module.exports = { orderedRules, select };
+module.exports = { orderedRules, select, refresh };

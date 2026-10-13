@@ -142,6 +142,49 @@ async function main () {
     '../libs/brush-store': require('../app/libs/brush-store')
   });
   const live = Object.assign(Object.create(Client.prototype), client({ maxLeechNum: 1 }), { client: transport, login () {} });
+  let loginRequests = 0;
+  let polls = 0;
+  let finishLogin;
+  const stateClient = Object.assign(Object.create(Client.prototype), client({ status: false, maindata: null }), {
+    cookie: null,
+    trackerStatus: {},
+    monitor: {},
+    ntf: { clientLoginError: async () => {} },
+    errorCount: 0,
+    client: {
+      login: async () => { loginRequests++; return new Promise(resolve => { finishLogin = resolve; }); },
+      getMaindata: async () => { polls++; return { torrents: [], freeSpaceOnDisk: 1000, uploadSpeed: 0, downloadSpeed: 0 }; }
+    }
+  });
+  const initialPoll = stateClient.getMaindata();
+  const concurrentPoll = stateClient.getMaindata();
+  assert.equal(loginRequests, 1, 'initial polling shares one login instead of racing sessions');
+  finishLogin('session');
+  await Promise.all([initialPoll, concurrentPoll]);
+  assert.equal(polls, 1, 'login immediately continues to fetch data without waiting for the next cron tick');
+  assert.equal(stateClient.status, true);
+  assert.equal(stateClient.maindata.torrents.length, 0);
+
+  let finishPoll;
+  stateClient.client.getMaindata = async () => { polls++; return new Promise((resolve, reject) => { finishPoll = reject; }); };
+  const failingPoll = stateClient.getMaindata();
+  const overlappingPoll = stateClient.getMaindata();
+  assert.equal(polls, 2, 'overlapping refreshes share one request; an older failure cannot overwrite a newer success');
+  finishPoll(new Error('temporary timeout https://private.example/passkey'));
+  await Promise.all([failingPoll, overlappingPoll]);
+  assert.match(capacity.reason(stateClient, 100), /状态读取失败.*temporary timeout/);
+  assert.equal(capacity.reason(stateClient, 100).includes('private.example'), false);
+  assert.throws(() => capacity.reserve(stateClient, 'not-sent', 100), error => error.code === 'CAPACITY_UNAVAILABLE');
+  stateClient.client.getMaindata = async () => { polls++; return { torrents: [], freeSpaceOnDisk: 1000, uploadSpeed: 0, downloadSpeed: 0 }; };
+  await routing.refresh({ clientArr: [stateClient.id], acceptRules: [] }, { [stateClient.id]: stateClient });
+  assert.equal(stateClient.status, true, 'RSS rechecks a failed cached state before rejecting the downloader');
+  assert.equal(capacity.reason(stateClient, 100), '');
+  stateClient.status = false;
+  stateClient.maindata = null;
+  let recoveredAdds = 0;
+  stateClient.client.addTorrent = async () => { recoveredAdds++; return { statusCode: 200 }; };
+  await stateClient.addTorrent('url', 'refresh-before-send', false, 0, 0, '', '', false, false, { size: 100 });
+  assert.equal(recoveredAdds, 1, 'refresh again before final admission when state changed after RSS selection');
   const adding = live.addTorrent('url', 'one', false, 0, 0, '', '', false, false, { size: 100 });
   await assert.rejects(live.addTorrent('url', 'two', false), /最大下载数量/);
   release();
@@ -348,6 +391,7 @@ async function main () {
       await retryQueue.tick();
       assert.equal(downloads, 1, 'offline downloader waits without consuming a retry');
       retryClient.status = true;
+      clock += 30000;
       await retryQueue.tick();
       assert.equal(downloads, 2, 'metadata failures retry without needing the RSS item to reappear');
       retryQueue.stop(retryQueue.get(retryTask.id, metadataFailure.hash).id);
@@ -358,6 +402,33 @@ async function main () {
       Date.now = realNow;
       global.runningRss = savedRss;
     }
+    const unavailableClient = client({ status: false, maindata: null });
+    let recovered = false;
+    unavailableClient.ensureAvailable = async () => {
+      if (recovered) {
+        unavailableClient.status = true;
+        unavailableClient.maindata = { torrents: [], freeSpaceOnDisk: 1000 };
+      }
+    };
+    global.runningClient[unavailableClient.id] = unavailableClient;
+    const temporaryTorrent = { ...torrent, hash: 'temporary-unavailable' };
+    const temporaryTask = Object.assign(Object.create(Rss.prototype), rss, {
+      id: 'temporary-rss',
+      clientArr: [unavailableClient.id],
+      acceptRules: [],
+      _pushTorrent: async () => retryQueue.success('temporary-rss', temporaryTorrent.hash)
+    });
+    await temporaryTask.rss([temporaryTorrent]);
+    const queuedTemporary = retryQueue.get(temporaryTask.id, temporaryTorrent.hash);
+    assert.equal(queuedTemporary.state, 'waiting', 'temporary state rejection retains RSS payload for retry instead of losing the item');
+    recovered = true;
+    queuedTemporary.nextAt = Date.now() - 1;
+    retryStore.put('rss-retry', queuedTemporary.id, queuedTemporary);
+    global.runningRss = { [temporaryTask.id]: temporaryTask };
+    try {
+      await retryQueue.tick();
+      assert.equal(retryQueue.get(temporaryTask.id, temporaryTorrent.hash).state, 'done', 'recovered downloader receives the saved RSS item');
+    } finally { global.runningRss = savedRss; }
     let finish;
     let runs = 0;
     rss._runRss = async () => { runs++; await new Promise(resolve => { finish = resolve; }); };

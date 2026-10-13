@@ -61,10 +61,15 @@ async function tick () {
     const task = global.runningRss?.[entry.rssId];
     if (!task || task.stopped || task.processing || active.has(entry.id)) continue;
     const client = global.runningClient?.[entry.clientId];
-    if (entry.clientId && !client?.status) continue;
     active.add(entry.id);
     let invoked = false;
     try {
+      if (client?.ensureAvailable) await client.ensureAvailable();
+      if (entry.clientId && !client?.status) {
+        entry.nextAt = Date.now() + interval;
+        save(entry);
+        continue;
+      }
       let job = recovery.forFeed(entry.rssId, entry.torrent.hash);
       if (job) {
         if (['stopped', 'verificationFailed'].includes(job.state)) {
