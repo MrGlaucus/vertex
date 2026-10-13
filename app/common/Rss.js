@@ -20,7 +20,8 @@ class Rss {
     this._rss = rss;
     this.id = rss.id;
     this.maxSleepTime = rss.maxSleepTime;
-    this.lastRssTime = 0;
+    this.lastRssTime = null;
+    this.fetchErrorAt = null;
     this.alias = rss.alias;
     this.urls = rss.rssUrls;
     this.clientArr = rss.clientArr || [rss.client];
@@ -320,7 +321,7 @@ class Rss {
         let truehash = '';
         if (this.stopped) return;
         let downloadUrl = torrent.url;
-        if (this.useCustomRegex && !this.pushTorrentFile) {
+        if (this.useCustomRegex && !this.pushTorrentFile && (this._rss.regexScope || 'download') === 'download') {
           const match = (this.regexStr || '').match(/^\/(.*)\/([gimuy]*)$/);
           if (!match) throw new Error('自定义下载链接正则表达式无效');
           downloadUrl = downloadUrl.replace(new RegExp(match[1], match[2]), this.replaceStr);
@@ -377,10 +378,23 @@ class Rss {
 
   async _runRss (_torrents, retryOnly = false) {
     let torrents = [];
+    let sleepExceeded = false;
     if (_torrents) {
       torrents = _torrents;
     } else {
-      torrents = (await Promise.all(this.urls.map(url => rss.getTorrents(url)))).flat();
+      const startedAt = moment().unix();
+      try {
+        torrents = (await Promise.all(this.urls.map(url => rss.getTorrents(url, this._rss, { throwOnError: true })))).flat();
+      } catch (error) {
+        if (this.fetchErrorAt === null || this.fetchErrorAt === undefined) this.fetchErrorAt = startedAt;
+        throw error;
+      }
+      const fetchedAt = moment().unix();
+      const previous = this.lastRssTime ?? this.fetchErrorAt;
+      // A new instance has no previous fetch. Normal restarts are not RSS outages.
+      sleepExceeded = previous !== null && previous !== undefined && fetchedAt - previous > +this.maxSleepTime;
+      this.lastRssTime = fetchedAt;
+      this.fetchErrorAt = null;
     }
     torrents = [...new Map([...torrents, ...(retryOnly ? [] : autoReseed.waiting(this.id))].map(t => [t.hash, t])).values()];
     await routing.refresh(this, global.runningClient);
@@ -400,7 +414,7 @@ class Rss {
         await this.ntf.rejectTorrent(this._rss, undefined, torrent, `拒绝原因: 达到单小时推送上限: ${this.addCount} / ${this.addCountPerHour}`);
         return;
       }
-      if (!retryOnly && moment().unix() - this.lastRssTime > +this.maxSleepTime) {
+      if (!retryOnly && sleepExceeded) {
         await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
           [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, '拒绝原因: 最长休眠时间']);
         await this.ntf.rejectTorrent(this._rss, undefined, torrent, '拒绝原因: 最长休眠时间');
@@ -456,11 +470,10 @@ class Rss {
         await this._pushTorrent(torrent, selection.client, fitRule);
       }
     }
-    if (!retryOnly) this.lastRssTime = moment().unix();
   }
 
   async dryrun () {
-    const torrents = (await Promise.all(this.urls.map(url => rss.getTorrents(url)))).flat();
+    const torrents = (await Promise.all(this.urls.map(url => rss.getTorrents(url, this._rss, { throwOnError: true })))).flat();
     for (const torrent of torrents) {
       let reject = false;
       for (const rejectRule of this.rejectRules) {

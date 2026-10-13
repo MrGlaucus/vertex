@@ -7,14 +7,23 @@ const bencode = require('bencode');
 const util = require('./util');
 const redis = require('./redis');
 const logger = require('./logger');
+const xmlReplace = require('./rss-xml-replace');
 
 const parseXml = util.promisify(parser);
+const pendingFeeds = new Map();
 
 const _getSum = function (a, b) {
   return a + b;
 };
 
 const _getRssContent = async function (rssUrl, suffix = true) {
+  if (pendingFeeds.has(rssUrl)) return pendingFeeds.get(rssUrl);
+  const pending = _fetchRssContent(rssUrl, suffix);
+  pendingFeeds.set(rssUrl, pending);
+  try { return await pending; } finally { pendingFeeds.delete(rssUrl); }
+};
+
+const _fetchRssContent = async function (rssUrl, suffix) {
   let body;
   const cache = await redis.get(`vertex:rss:${rssUrl}`);
   if (cache) {
@@ -57,10 +66,21 @@ const _getRssContent = async function (rssUrl, suffix = true) {
   return body;
 };
 
-const _getTorrents = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _parseRss = async function (rssUrl, suffix, replacements) {
+  const original = await _getRssContent(rssUrl, suffix);
+  const content = xmlReplace.apply(original, replacements);
+  try { return await parseXml(content); } catch (error) {
+    if (!replacements.length) throw error;
+    const invalid = new Error('替换后的 RSS XML 无法解析，请检查替换规则和 XML 转义');
+    invalid.code = 'RSS_XML_INVALID';
+    throw invalid;
+  }
+};
+
+const _getTorrents = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -84,10 +104,10 @@ const _getTorrents = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsMTeam = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl, false));
+const _getTorrentsMTeam = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, false, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -111,10 +131,10 @@ const _getTorrentsMTeam = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsPuTao = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsPuTao = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -149,10 +169,10 @@ const _getTorrentsPuTao = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsFileList = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsFileList = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -182,10 +202,10 @@ const _getTorrentsFileList = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsBeyondHD = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsBeyondHD = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -214,10 +234,10 @@ const _getTorrentsBeyondHD = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsUnit3D2 = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsUnit3D2 = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -247,10 +267,10 @@ const _getTorrentsUnit3D2 = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsUnit3D = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsUnit3D = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -280,10 +300,10 @@ const _getTorrentsUnit3D = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsTorrentDB = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsTorrentDB = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -312,10 +332,10 @@ const _getTorrentsTorrentDB = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsLuminance = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsLuminance = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -338,10 +358,10 @@ const _getTorrentsLuminance = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsGazelle = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsGazelle = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -385,10 +405,10 @@ const _getTorrentsGazelle = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsSkyeySnow = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsSkyeySnow = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -425,10 +445,10 @@ const _getTorrentsSkyeySnow = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsHDBits = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsHDBits = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -465,10 +485,10 @@ const _getTorrentsHDBits = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsHDTorrents = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsHDTorrents = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -490,10 +510,10 @@ const _getTorrentsHDTorrents = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsHDCity = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsHDCity = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -515,10 +535,10 @@ const _getTorrentsHDCity = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsIPTorrents = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsIPTorrents = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -542,10 +562,10 @@ const _getTorrentsIPTorrents = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsMikanProject = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsMikanProject = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   if (!items) return [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
@@ -569,10 +589,10 @@ const _getTorrentsMikanProject = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsLearnFlakes = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl, false));
+const _getTorrentsLearnFlakes = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, false, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -600,10 +620,10 @@ const _getTorrentsLearnFlakes = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsAvistaZ = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsAvistaZ = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -634,10 +654,10 @@ const _getTorrentsAvistaZ = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsTorrentLeech = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsTorrentLeech = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -677,10 +697,10 @@ const _getTorrentsTorrentLeech = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsFSM = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsFSM = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -702,10 +722,10 @@ const _getTorrentsFSM = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsHappyFappy = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsHappyFappy = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -728,10 +748,10 @@ const _getTorrentsHappyFappy = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsKimoji = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsKimoji = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -761,10 +781,10 @@ const _getTorrentsKimoji = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsFappaizuri = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl, false));
+const _getTorrentsFappaizuri = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, false, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -792,10 +812,10 @@ const _getTorrentsFappaizuri = async function (rssUrl) {
   return torrents;
 };
 
-const _getTorrentsLusthive = async function (rssUrl) {
-  const rss = await parseXml(await _getRssContent(rssUrl));
+const _getTorrentsLusthive = async function (rssUrl, replacements = []) {
+  const rss = await _parseRss(rssUrl, true, replacements);
   const torrents = [];
-  const items = rss.rss.channel[0].item;
+  const items = rss.rss.channel[0].item || [];
   for (let i = 0; i < items.length; ++i) {
     const torrent = {
       size: 0,
@@ -860,18 +880,24 @@ const _getTorrentsWrapper = {
   'lusthive.org': _getTorrentsLusthive
 };
 
-exports.getTorrents = async function (rssUrl) {
+exports.getTorrents = async function (rssUrl, settings = {}, options = {}) {
   const host = new URL(rssUrl).host;
+  const replacements = xmlReplace.compile(settings);
   try {
     if (host.indexOf('m-team') !== -1) {
-      return await _getTorrentsMTeam(rssUrl);
+      return await _getTorrentsMTeam(rssUrl, replacements);
     }
     if (_getTorrentsWrapper[host]) {
-      return await _getTorrentsWrapper[host](rssUrl);
+      return await _getTorrentsWrapper[host](rssUrl, replacements);
     }
-    return await _getTorrents(rssUrl);
+    return await _getTorrents(rssUrl, replacements);
   } catch (e) {
     logger.error(host, '获取 Rss 报错', e);
+    if (replacements.length || options.throwOnError) {
+      if (e.code === 'RSS_XML_INVALID') throw e;
+      const reason = String(e.message || e).replace(/https?:\/\/\S+/g, '[地址已隐藏]').slice(0, 300);
+      throw new Error(host + ' 获取或解析 RSS 失败: ' + reason);
+    }
     return [];
   }
 };

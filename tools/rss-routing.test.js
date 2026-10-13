@@ -120,7 +120,8 @@ async function main () {
   assert.equal(routing.select(modeTask, { size: 100 }, {}, modeClients).client, strictChoice, 'disabled space protection retains original raw free space sorting');
   relaxedSlot.release();
 
-  const moment = () => ({ unix: () => 1000 });
+  let currentUnix = 1000;
+  const moment = () => ({ unix: () => currentUnix });
   const logger = { info () {}, debug () {}, error () {} };
   let release;
   let requests = 0;
@@ -232,9 +233,13 @@ async function main () {
   assert.throws(() => new ClientMod().modify({ capacityMode: 'invalid' }), /未知空间计算模式/);
 
   let records = [];
+  let fetchedSettings;
+  let fetchedOptions;
+  let fetchFailure;
+  let emptyFeed = false;
   const torrent = { name: 'example', size: 100, hash: 'rss-test', link: 'link' };
   const Rss = load('app/common/Rss.js', {
-    '../libs/rss': { getTorrents: async () => [{ ...torrent }] },
+    '../libs/rss': { getTorrents: async (url, settings, options) => { fetchedSettings = settings; fetchedOptions = options; if (fetchFailure) throw fetchFailure; return emptyFeed ? [] : [{ ...torrent }]; } },
     '../libs/util': { getRecord: async () => null, runRecord: async (...args) => records.push(args), uuid: { v4: () => 'uuid' } },
     '../libs/logger': logger,
     '../libs/redis': {},
@@ -274,8 +279,67 @@ async function main () {
     assert.match(records[0][1][7], /不回退/);
     rss.clientArr = [a.id, b.id];
     const preview = await rss.dryrun();
+    assert.equal(fetchedSettings, rss._rss, 'dry run passes task replacement settings to RSS parsing');
     assert.equal(preview[0].downloader, b.alias);
     assert.equal(preview[0].matchedRule, '指定机器');
+    assert.equal(fetchedOptions.throwOnError, true, 'dry run must not hide RSS failures as an empty feed');
+    let lifecycleAdds = 0;
+    const lifecycle = Object.assign(Object.create(Rss.prototype), rss, {
+      id: 'restart-rss',
+      acceptRules: [],
+      lastRssTime: null,
+      fetchErrorAt: null,
+      _pushTorrent: async () => { lifecycleAdds++; }
+    });
+    try {
+      currentUnix = 10000;
+      await lifecycle.rss();
+      assert.equal(lifecycleAdds, 1, 'normal restart first success is not rejected as a long sleep');
+      assert.equal(lifecycle.lastRssTime, 10000);
+      currentUnix += 30;
+      await lifecycle.rss();
+      assert.equal(lifecycleAdds, 2);
+      fetchFailure = new Error('RSS temporarily unavailable');
+      currentUnix += 10;
+      await assert.rejects(lifecycle.rss(), /RSS temporarily unavailable/);
+      assert.equal(lifecycle.lastRssTime, 10030, 'RSS errors never refresh the last successful fetch time');
+      assert.equal(lifecycle.fetchErrorAt, 10040);
+      currentUnix += 180;
+      await assert.rejects(lifecycle.rss(), /RSS temporarily unavailable/);
+      assert.equal(lifecycle.fetchErrorAt, 10040, 'repeated failures retain the initial failure time');
+      fetchFailure = null;
+      await lifecycle.rss();
+      assert.equal(lifecycleAdds, 2, 'long RSS outage still rejects the first recovered batch');
+      assert.equal(lifecycle.lastRssTime, currentUnix);
+      currentUnix += 30;
+      await lifecycle.rss();
+      assert.equal(lifecycleAdds, 3, 'the next healthy batch is processed normally');
+      const successAt = lifecycle.lastRssTime;
+      currentUnix += 300;
+      await lifecycle.rss([torrent], true);
+      assert.equal(lifecycle.lastRssTime, successAt, 'retry processing cannot mask a failing RSS feed');
+      lifecycle.lastRssTime = null;
+      lifecycle.fetchErrorAt = null;
+      fetchFailure = new Error('failed during startup');
+      await assert.rejects(lifecycle.rss(), /failed during startup/);
+      const beforeRecovery = lifecycleAdds;
+      currentUnix += 121;
+      fetchFailure = null;
+      await lifecycle.rss();
+      assert.equal(lifecycleAdds, beforeRecovery, 'startup with prolonged fetch errors is distinguished from a healthy restart');
+      currentUnix += 30;
+      emptyFeed = true;
+      await lifecycle.rss();
+      assert.equal(lifecycle.lastRssTime, currentUnix, 'a successful empty feed refreshes health');
+      currentUnix += 30;
+      emptyFeed = false;
+      await lifecycle.rss();
+      assert.equal(lifecycleAdds, beforeRecovery + 1);
+    } finally {
+      currentUnix = 1000;
+      fetchFailure = null;
+      emptyFeed = false;
+    }
     records = [];
     await rss.rss([torrent]);
     assert.equal(pushed, true);
@@ -292,6 +356,16 @@ async function main () {
     assert.equal(sent[5], '/rule');
     assert.equal(sent[6], 'rule-category');
     assert.equal(sent[9].size, 100);
+    rss.useCustomRegex = true;
+    rss._rss.regexScope = 'xml';
+    rss.regexStr = '/download/g';
+    rss.replaceStr = 'must-not-apply-again';
+    await Rss.prototype._pushTorrent.call(rss, { ...torrent, url: 'download-url' }, b, {});
+    assert.equal(sent[0], 'download-url', 'XML mode must not apply the old download-link replacement a second time');
+    delete rss._rss.regexScope;
+    await Rss.prototype._pushTorrent.call(rss, { ...torrent, url: 'download-url' }, b, {});
+    assert.equal(sent[0], 'must-not-apply-again-url', 'legacy configurations still replace download links');
+    rss.useCustomRegex = false;
     sent = undefined;
     rss._downloadTorrent = async () => ({ filepath: 'torrent-file', hash: 'real-hash', size: 110 });
     b.addTorrentByTorrentFile = async (...args) => { sent = args; };

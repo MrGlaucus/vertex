@@ -4,6 +4,7 @@ const Rss = require('../common/Rss');
 
 const util = require('../libs/util');
 function validate (rssSet) {
+  require('../libs/rss-xml-replace').compile(rssSet);
   if (rssSet.reseedMode && !['safe', 'fast', 'compatible'].includes(rssSet.reseedMode)) throw new Error('未知辅种策略');
   if (rssSet.ruleOrder && !['legacy', 'configured'].includes(rssSet.ruleOrder)) throw new Error('未知规则顺序');
   if (rssSet.reseedWaitMinutes !== undefined && (!Number.isFinite(Number(rssSet.reseedWaitMinutes)) || +rssSet.reseedWaitMinutes < 0 || +rssSet.reseedWaitMinutes > 1440)) throw new Error('辅种等待时间应在 0 到 1440 分钟之间');
@@ -62,6 +63,7 @@ class RssMod {
   async dryrun (options) {
     const id = util.uuid.v4().split('-')[0];
     const rssSet = { ...options };
+    validate(rssSet);
     rssSet.id = id;
     rssSet.dryrun = true;
     const rss = new Rss(rssSet);

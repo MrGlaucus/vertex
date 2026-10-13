@@ -260,7 +260,7 @@
         <a-form-item
           label="最长休眠时间"
           name="maxSleepTime"
-          extra="最长休眠时间, 若上次成功 RSS 在 N 秒以前, 则本次 RSS 拒绝所有种子, 建议为 3-5 倍于 Rss 周期, 单位为秒"
+          extra="距上次成功获取超过此秒数，恢复时跳过本轮新候选；建议设为 RSS 周期的 3–5 倍。正常重启后的首次成功获取不触发，获取失败不刷新成功时间，重试任务不受此限制。"
           :rules="[{ required: true, message: '${label}不可为空! ' }]">
           <a-input size="small" v-model:value="rss.maxSleepTime"/>
         </a-form-item>
@@ -304,24 +304,42 @@
         </a-form-item>
         <a-form-item
           label="自定义正则替换"
-          v-if="!rss.pushTorrentFile"
           name="useCustomRegex"
-          extra="对种子下载链接进行自定义正则表达式替换, 仅在推送方式为推送种子下载链接时生效。不完全理解本功能请勿设置, 不恰当的配置可能导致你的账号被ban。">
-          <a-checkbox v-model:checked="rss.useCustomRegex">使用自定义正则</a-checkbox>
+          extra="在解析 RSS 前替换原始 XML 中的任意文本，包括标题、简介、链接、标签和属性；同时支持推送种子文件及下载链接。旧任务保留原来的下载链接替换范围。">
+          <a-checkbox v-model:checked="rss.useCustomRegex" @change="ensureRegexRules">启用正则替换</a-checkbox>
+        </a-form-item>
+        <a-form-item v-if="rss.useCustomRegex" label="替换范围" name="regexScope">
+          <a-select v-model:value="rss.regexScope" @change="ensureRegexRules">
+            <a-select-option value="xml">整个 RSS XML 文本</a-select-option>
+            <a-select-option value="download">仅下载链接（兼容旧配置）</a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item v-if="rss.useCustomRegex && rss.regexScope === 'xml'" label="全文替换规则"
+          extra="从上到下依次替换；使用 g 替换全部匹配，i 忽略大小写，s 允许点号跨行。支持 $1 等捕获组，替换内容留空表示删除。替换后必须保持合法 XML；XML 属性中的 &amp; 应写为 &amp;amp;。">
+          <div v-for="(rule, index) in rss.regexRules" :key="index" class="regex-rule">
+            <a-space class="regex-rule-heading"><strong>规则 {{ index + 1 }}</strong><a-button size="small" :disabled="index === 0" @click="moveRegexRule(index, -1)">上移</a-button><a-button size="small" :disabled="index === rss.regexRules.length - 1" @click="moveRegexRule(index, 1)">下移</a-button><a-button size="small" danger @click="rss.regexRules.splice(index, 1)">删除</a-button></a-space>
+            <a-form-item label="匹配表达式" :name="['regexRules', index, 'regexStr']" :rules="[{ required: true, message: '请输入正则表达式' }]">
+              <a-textarea v-model:value="rule.regexStr" :auto-size="{ minRows: 2, maxRows: 6 }" placeholder="例如 /旧文本/g 或 /old\.example\.com/g" />
+            </a-form-item>
+            <a-form-item label="替换为" :name="['regexRules', index, 'replaceStr']">
+              <a-textarea v-model:value="rule.replaceStr" :auto-size="{ minRows: 2, maxRows: 6 }" placeholder="替换后的文本，留空表示删除匹配内容" />
+            </a-form-item>
+          </div>
+          <a-button size="small" @click="addRegexRule">新增替换规则</a-button>
+          <p class="regex-help">点击下方「试运行」查看替换后解析出的种子；规则导致 XML 无法解析时会显示错误，不执行添加。</p>
         </a-form-item>
         <a-form-item
           label="正则表达式"
-          v-if="(!rss.pushTorrentFile) && rss.useCustomRegex"
+          v-if="rss.useCustomRegex && rss.regexScope === 'download'"
           name="regexStr"
-          extra="格式: /pattern/flags"
+          extra="格式: /pattern/flags；兼容旧行为，仅在推送下载链接时生效，不修改 RSS XML。"
           :rules="[{ required: true, message: '${label}不可为空! ' }]">
           <a-input size="small" v-model:value="rss.regexStr"/>
         </a-form-item>
         <a-form-item
           label="替换为"
-          v-if="(!rss.pushTorrentFile) && rss.useCustomRegex"
-          name="replaceStr"
-          :rules="[{ required: true, message: '${label}不可为空! ' }]">
+          v-if="rss.useCustomRegex && rss.regexScope === 'download'"
+          name="replaceStr">
           <a-input size="small" v-model:value="rss.replaceStr"/>
         </a-form-item>
         <a-form-item
@@ -474,6 +492,9 @@ export default {
       rssRules: [],
       rss: {},
       defaultRss: {
+        useCustomRegex: false,
+        regexScope: 'xml',
+        regexRules: [],
         clientArr: [],
         enable: false,
         scrapeFree: false,
@@ -569,10 +590,12 @@ export default {
       }
     },
     modifyClick (row) {
-      this.rss = { ...row };
+      this.rss = { ...row, regexScope: row.regexScope || 'download', regexRules: (row.regexRules || []).map(rule => ({ ...rule })) };
     },
     cloneClick (row) {
       this.rss = JSON.parse(JSON.stringify(row));
+      this.rss.regexScope = row.regexScope || 'download';
+      this.rss.regexRules = this.rss.regexRules || [];
       this.rss.id = null;
       this.rss.alias = this.rss.alias + '-克隆';
     },
@@ -588,12 +611,28 @@ export default {
     clearRss () {
       this.rss = {
         ...this.defaultRss,
+        regexRules: [],
         acceptRules: [],
         clientArr: [],
         rejectRules: [],
         reseedClients: [],
         rssUrls: ['']
       };
+    },
+    ensureRegexRules () {
+      if (this.rss.useCustomRegex && this.rss.regexScope === 'xml' && !this.rss.regexRules?.length) {
+        this.rss.regexRules = [{ regexStr: this.rss.regexStr || '', replaceStr: this.rss.replaceStr || '' }];
+      }
+    },
+    addRegexRule () {
+      if (!Array.isArray(this.rss.regexRules)) this.rss.regexRules = [];
+      this.rss.regexRules.push({ regexStr: '', replaceStr: '' });
+    },
+    moveRegexRule (index, direction) {
+      const target = index + direction;
+      if (target < 0 || target >= this.rss.regexRules.length) return;
+      const rule = this.rss.regexRules.splice(index, 1)[0];
+      this.rss.regexRules.splice(target, 0, rule);
     }
   },
   async mounted () {
@@ -611,4 +650,7 @@ export default {
   max-width: 1440px;
   margin: 0 auto;
 }
+.regex-rule { border: 1px solid rgba(128, 128, 128, .25); padding: 16px; border-radius: 8px; margin-bottom: 12px; }
+.regex-rule-heading { margin-bottom: 16px; }
+.regex-help { margin-top: 10px; opacity: .65; font-size: 13px; }
 </style>

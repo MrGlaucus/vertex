@@ -6,7 +6,7 @@
   "scripts": {
     "app": "export HTTPS_PORT=4443 && export HTTPS_ENABLE=true && export DISPLAY=:99 && export PORT=4000 && nodemon app/app.js",
     "eslint": "eslint app",
-    "test": "node tools/rss-routing.test.js && node tools/brush-recovery.test.js"
+    "test": "node tools/rss-routing.test.js && node tools/brush-recovery.test.js && node tools/rss-xml-replace.test.js"
   },
   "author": "",
   "license": "MIT",

@@ -23,7 +23,7 @@ class UserMod {
       }, {
         title: '刷流中心',
         path: '/tool/brush',
-        icon: ['fas', 'chart-line']
+        icon: ['fas', 'arrows-rotate']
       }, {
         title: '数据监控',
         path: '/metric',
