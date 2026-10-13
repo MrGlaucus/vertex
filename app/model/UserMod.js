@@ -58,6 +58,10 @@ class UserMod {
           path: '/base/downloader',
           icon: ['fas', 'download']
         }, {
+          title: '下载器组',
+          path: '/base/downloader-group',
+          icon: ['fas', 'layer-group']
+        }, {
           title: '通知工具',
           path: '/base/notification',
           icon: ['fas', 'bell']

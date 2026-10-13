@@ -8,6 +8,7 @@ import DashboardIndex from '@/pages/dashboard/Index';
 
 import BaseServer from '@/pages/base/Server';
 import BaseDownloader from '@/pages/base/Downloader';
+import BaseDownloaderGroup from '@/pages/base/DownloaderGroup';
 import BaseSite from '@/pages/base/Site';
 import BaseNotification from '@/pages/base/Notification';
 
@@ -173,6 +174,10 @@ const base = {
       meta: {
         title: '下载器 - 基础组件'
       }
+    }, {
+      path: 'downloader-group',
+      component: BaseDownloaderGroup,
+      meta: { title: '下载器组 - 基础组件' }
     }, {
       path: 'site',
       component: BaseSite,

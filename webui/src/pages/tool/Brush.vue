@@ -112,7 +112,7 @@ export default {
       modes: { safe: '安全辅种', fast: '快速辅种', compatible: '兼容辅种' },
       retryStates: { waiting: '等待自动重试', done: '添加已接受 / 已确认', exhausted: '重试耗尽，已放弃', stopped: '自动重试已停止' },
       states: { sending: '正在发送请求', accepted: '已接受，等待确认', uncertain: '添加结果待核实', failed: '添加失败，等待处理', verifying: '辅种校验中', verificationFailed: '校验失败，保持暂停', tags: '辅种标签确认中', done: '添加流程完成', stopped: '自动恢复已停止' },
-      outcomes: { retryScheduled: '已安排重试', retryStarted: '开始重试', retrySucceeded: '重试成功', retryExhausted: '重试次数耗尽', retryDeferred: '等待核实后重试', retryStopped: '已停止重试', accepted: '添加已接受', reseedAccepted: '辅种已接受', reseedConfirmed: '辅种已确认', reseedMiss: '辅种未命中', reseedError: '辅种错误', rejected: '分配拒绝', failed: '添加失败', uncertain: '添加结果未知', deleted: '已删种', controlled: '已暂停或限速', waitExpired: '等待已过期' },
+      outcomes: { scheduleExpired: 'RSS 到期自动关闭', retryScheduled: '已安排重试', retryStarted: '开始重试', retrySucceeded: '重试成功', retryExhausted: '重试次数耗尽', retryDeferred: '暂缓重试', retryStopped: '已停止重试', accepted: '添加已接受', reseedAccepted: '辅种已接受', reseedConfirmed: '辅种已确认', reseedMiss: '辅种未命中', reseedError: '辅种错误', rejected: '分配拒绝', failed: '添加失败', uncertain: '添加结果未知', deleted: '已删种', controlled: '已暂停或限速', waitExpired: '等待已过期' },
       errorOutcomes: ['failed', 'uncertain', 'rejected', 'reseedError', 'retryExhausted'],
       deleteActions: { delete: '仅删除任务', deleteFiles: '删除任务及文件', pause: '暂停', limit: '限速' },
       clientColumns: [column('下载器', 'alias', 170), column('状态', 'status', 180), column('下载名额使用', 'capacity', 190), column('可用空间', 'space', 180), column('空间模式', 'mode', 150), column('当前速度', 'speed', 150), column('状态更新时间', 'time', 175)],

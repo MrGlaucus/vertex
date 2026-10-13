@@ -361,6 +361,23 @@ class Client {
   };
 
   async _managedAdd (request, admission) {
+    const checkSchedule = () => {
+      if (!admission.rssId) return;
+      const task = global.runningRss?.[admission.rssId];
+      if ((task && (task.stopped || (task.canRun && !task.canRun()))) || (!task && store.get('rss-schedule', admission.rssId))) {
+        const error = new Error('RSS 当前不在运行时段内或已到期关闭');
+        error.code = 'RSS_SCHEDULE_PAUSED';
+        error.definite = true;
+        throw error;
+      }
+      if (task?.allowsClient && !task.allowsClient(this.id, admission)) {
+        const error = new Error('下载器组或规则已变更，当前下载器不再属于允许范围');
+        error.code = 'CAPACITY_REJECTED';
+        error.definite = true;
+        throw error;
+      }
+    };
+    checkSchedule();
     await this.ensureAvailable();
     if (admission.reseed && !admission.locked) return requestLimit.run('data:' + this.id, 1, () => this._managedAdd(request, { ...admission, locked: true }));
     if (admission.reseed) {
@@ -374,11 +391,15 @@ class Client {
     let job;
     let httpAccepted = false;
     try {
+      checkSchedule();
       store.transaction(() => {
         reservation = capacity.reserve(this, request.hash, request.size, { maxCount: admission.maxCount, reseed: !!admission.reseed || request.isSkipChecking });
         job = recovery.begin(this, request.hash, request, admission);
       });
-      const response = await requestLimit.run('add:' + this.id, 1, () => this.client[method](this.clientUrl, this.cookie, request.target, request.isSkipChecking, request.uploadLimit, request.downloadLimit, request.savePath, request.category, request.autoTMM, this.firstLastPiecePrio, request.paused));
+      const response = await requestLimit.run('add:' + this.id, 1, () => {
+        checkSchedule();
+        return this.client[method](this.clientUrl, this.cookie, request.target, request.isSkipChecking, request.uploadLimit, request.downloadLimit, request.savePath, request.category, request.autoTMM, this.firstLastPiecePrio, request.paused);
+      });
       const { statusCode, body } = response;
       if (statusCode !== 200 && statusCode !== 202 && statusCode !== 204) {
         const error = new Error('状态码: ' + statusCode);
@@ -411,7 +432,14 @@ class Client {
             if (!job || error.definite) reservation.release();
             else reservation.uncertain();
           }
-          if (job) recovery.failed(job, error, !!error.definite);
+          if (job && error.code === 'RSS_SCHEDULE_PAUSED') {
+            job.state = 'failed';
+            job.checkedFailure = true;
+            job.attempts = Math.max(0, job.attempts - 1);
+            job.nextAt = Date.now();
+            job.error = '定时运行暂停，尚未向下载器发送添加请求';
+            recovery.save(job);
+          } else if (job) recovery.failed(job, error, !!error.definite);
         });
         throw error;
       }

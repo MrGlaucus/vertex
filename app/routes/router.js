@@ -207,6 +207,10 @@ module.exports = function (app, express, router) {
   router.post('/watch/deleteRecord', ctrl.Watch.deleteRecord);
 
   router.get('/rss/list', ctrl.Rss.list);
+  router.get('/downloaderGroup/list', ctrl.DownloaderGroup.list);
+  router.post('/downloaderGroup/add', ctrl.DownloaderGroup.add);
+  router.post('/downloaderGroup/modify', ctrl.DownloaderGroup.modify);
+  router.post('/downloaderGroup/delete', ctrl.DownloaderGroup.delete);
   router.post('/rss/add', ctrl.Rss.add);
   router.post('/rss/dryrun', ctrl.Rss.dryrun);
   router.post('/rss/modify', ctrl.Rss.modify);

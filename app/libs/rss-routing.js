@@ -1,4 +1,5 @@
 const capacity = require('./capacity');
+const groups = require('./downloader-groups');
 
 function orderedRules (rules, ids, order = 'configured') {
   const selected = order === 'legacy' ? rules.filter(rule => ids.includes(rule.id)) : ids.map(id => rules.find(rule => rule.id === id)).filter(Boolean);
@@ -7,7 +8,7 @@ function orderedRules (rules, ids, order = 'configured') {
 }
 
 async function refresh (task, clients = {}) {
-  const ids = [...(task.clientArr || []), ...(task.reseedClients || []), ...(task.acceptRules || []).flatMap(rule => rule.client ? [rule.client] : rule.clientArr || [])];
+  const ids = [...groups.normal(task), ...groups.reseed(task), ...(task.acceptRules || []).flatMap(rule => groups.ruleClients(task, rule))];
   await Promise.all([...new Set(ids)].map(async id => {
     const client = clients[id];
     if (client?.ensureAvailable && capacity.isUnavailable(client)) await client.ensureAvailable();
@@ -15,9 +16,9 @@ async function refresh (task, clients = {}) {
 }
 
 function select (task, torrent, rule = {}, clients = {}) {
-  const group = !rule.client && Array.isArray(rule.clientArr) && rule.clientArr.length > 0;
+  const group = (!rule.client || (rule.clientGroupIds || []).length) && groups.restricted(rule);
   // Legacy single-downloader overrides remain usable without task membership.
-  const ids = group ? rule.clientArr.filter(id => task.clientArr.includes(id)) : rule.client ? [rule.client] : task.clientArr;
+  const ids = groups.ruleClients(task, rule);
   const candidates = [...new Set(ids)].map(id => {
     const client = clients[id];
     let reason = capacity.reason(client, torrent.size, { maxCount: task.maxClientDownloadCount, hash: torrent.hash });

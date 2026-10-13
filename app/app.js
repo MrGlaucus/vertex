@@ -116,6 +116,10 @@ const init = function () {
     }
   }
   for (const rss of util.listRss()) {
+    if ((rss.enable || rss.scheduleExpiredAt) && require('./libs/rss-schedule').state(rss).status === 'expired') {
+      require('./libs/rss-schedule-expiry').close(rss);
+      continue;
+    }
     if (rss.enable) {
       global.runningRss[rss.id] = new Rss(rss);
     }

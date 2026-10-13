@@ -14,6 +14,8 @@ const autoReseed = require('../libs/auto-reseed');
 const recovery = require('../libs/brush-recovery');
 const store = require('../libs/brush-store');
 const rssRetry = require('../libs/rss-retry');
+const schedule = require('../libs/rss-schedule');
+const groups = require('../libs/downloader-groups');
 
 class Rss {
   constructor (rss) {
@@ -28,7 +30,7 @@ class Rss {
     this.clientSortBy = rss.clientSortBy;
     this.autoReseed = rss.autoReseed;
     this.onlyReseed = rss.onlyReseed;
-    this.reseedClients = rss.reseedClients || rss.clientArr || [rss.client];
+    this.reseedClients = rss.reseedClients;
     this.pushMessage = rss.pushMessage;
     this.skipSameTorrent = rss.skipSameTorrent;
     this.scrapeFree = rss.scrapeFree;
@@ -61,6 +63,12 @@ class Rss {
     if (!rss.dryrun) {
       this.rssJob = cron.schedule(rss.cron, async () => { try { await this.rss(); } catch (e) { logger.error(this.alias, e); } });
       this.clearCount = cron.schedule('0 * * * *', () => { this.addCount = 0; });
+      if (rss.dailyWindowEnabled || rss.expireEnabled) {
+        this.scheduleTimer = setInterval(() => {
+          try { this.canRun(); } catch (error) { logger.error(this.alias, '检查定时运行失败:', error.message); }
+        }, 1000);
+        this.scheduleTimer.unref();
+      }
       logger.info('Rss 任务', this.alias, '初始化完毕');
     }
   }
@@ -187,12 +195,35 @@ class Rss {
     }
   }
 
+  allowsClient (clientId, admission) {
+    const rule = admission.ruleId ? this.acceptRules.find(rule => rule.id === admission.ruleId) : {};
+    if (!rule) return false;
+    return (admission.reseed ? groups.reseedClients(this, rule) : groups.ruleClients(this, rule)).includes(clientId);
+  }
+
+  canRun () {
+    if (this.stopped) return false;
+    const status = schedule.state(this._rss);
+    if (!status.allowed) {
+      // Planned downtime is not an RSS fetch outage.
+      this.lastRssTime = null;
+      this.fetchErrorAt = null;
+    }
+    if (status.status === 'expired' && !this._rss.dryrun) {
+      require('../libs/rss-schedule-expiry').close(this._rss);
+      this._rss.enable = false;
+      this.destroy();
+    }
+    return status.allowed;
+  }
+
   destroy () {
     logger.info('销毁 Rss 实例:', this.alias);
     this.stopped = true;
-    this.rssJob.stop();
+    if (this.scheduleTimer) clearInterval(this.scheduleTimer);
+    if (this.rssJob) this.rssJob.stop();
     delete this.rssJob;
-    this.clearCount.stop();
+    if (this.clearCount) this.clearCount.stop();
     delete this.clearCount;
     delete global.runningRss[this.id];
   }
@@ -319,7 +350,7 @@ class Rss {
       let accepted = false;
       try {
         let truehash = '';
-        if (this.stopped) return;
+        if (!this.canRun()) return false;
         let downloadUrl = torrent.url;
         if (this.useCustomRegex && !this.pushTorrentFile && (this._rss.regexScope || 'download') === 'download') {
           const match = (this.regexStr || '').match(/^\/(.*)\/([gimuy]*)$/);
@@ -329,7 +360,7 @@ class Rss {
         if (this.pushTorrentFile || torrent.hash.indexOf('fakehash') !== -1) {
           const { filepath, hash, size } = await this._downloadTorrent(downloadUrl, torrent.hash);
           truehash = hash;
-          if (this.stopped) return;
+          if (!this.canRun()) return false;
           await client.addTorrentByTorrentFile(filepath, hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused, { size: size || torrent.size, maxCount: this.maxClientDownloadCount, rssId: this.id, feedHash: torrent.hash, name: torrent.name, ruleId: fitRule.id, ruleAlias: fitRule.alias });
         } else {
           await client.addTorrent(downloadUrl, torrent.hash, false, this.uploadLimit, this.downloadLimit, savePath, category, this.autoTMM, this.paused, { size: torrent.size, maxCount: this.maxClientDownloadCount, rssId: this.id, feedHash: torrent.hash, name: torrent.name, ruleId: fitRule.id, ruleAlias: fitRule.alias });
@@ -349,6 +380,7 @@ class Rss {
             [truehash, torrent.name, torrent.size, this.id, torrent.link, category, moment().unix(), moment().unix(), 1, '添加种子']);
         }
       } catch (error) {
+        if (error.code === 'RSS_SCHEDULE_PAUSED') return false;
         if (accepted) {
           logger.error(this.alias, '种子添加请求已接受，历史记录写入失败:', error.message);
           return;
@@ -367,10 +399,10 @@ class Rss {
   }
 
   async rss (_torrents, retryOnly = false) {
-    if (this.processing || this.stopped) return;
+    if (this.processing || !this.canRun()) return false;
     this.processing = true;
     try {
-      await this._runRss(_torrents, retryOnly);
+      return await this._runRss(_torrents, retryOnly);
     } finally {
       this.processing = false;
     }
@@ -386,6 +418,7 @@ class Rss {
       try {
         torrents = (await Promise.all(this.urls.map(url => rss.getTorrents(url, this._rss, { throwOnError: true })))).flat();
       } catch (error) {
+        if (!this.canRun()) return false;
         if (this.fetchErrorAt === null || this.fetchErrorAt === undefined) this.fetchErrorAt = startedAt;
         throw error;
       }
@@ -399,7 +432,7 @@ class Rss {
     torrents = [...new Map([...torrents, ...(retryOnly ? [] : autoReseed.waiting(this.id))].map(t => [t.hash, t])).values()];
     await routing.refresh(this, global.runningClient);
     for (const torrent of torrents) {
-      if (this.stopped) return;
+      if (!this.canRun()) return false;
       const queued = rssRetry.get(this.id, torrent.hash);
       if (queued && !retryOnly) continue;
       const sqlRes = await util.getRecord('SELECT * FROM torrents WHERE hash = ? AND rss_id = ?', [torrent.hash, this.id]);
@@ -442,6 +475,7 @@ class Rss {
               continue;
             }
           } catch (error) {
+            if (error.code === 'RSS_SCHEDULE_PAUSED') return false;
             logger.error(this.alias, '辅种处理失败:', error.message);
             store.event({ rssId: this.id, hash: torrent.hash, name: torrent.name, outcome: 'reseedError', reason: recovery.safeError(error) });
             if (error.code !== 'CAPACITY_REJECTED') rssRetry.fail(this.id, torrent, recovery.forFeed(this.id, torrent.hash)?.clientId, error);
@@ -467,7 +501,7 @@ class Rss {
           await this.ntf.rejectTorrent(this._rss, undefined, torrent, selection.reason);
           continue;
         }
-        await this._pushTorrent(torrent, selection.client, fitRule);
+        if (await this._pushTorrent(torrent, selection.client, fitRule) === false) return false;
       }
     }
   }

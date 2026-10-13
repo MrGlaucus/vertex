@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const util = require('../libs/util');
+const groups = require('../libs/downloader-groups');
 class RssRuleMod {
   add (options) {
     options = this.normalize(options);
@@ -41,9 +42,11 @@ class RssRuleMod {
 
   normalize (options) {
     const rule = { ...options };
+    groups.validateReferences(rule.clientGroupIds);
+    if ((rule.clientGroupIds || []).length) delete rule.client;
     if (rule.priority !== undefined && rule.priority !== '' && !Number.isFinite(Number(rule.priority))) throw new Error('优先级必须为数字');
     if (Object.prototype.hasOwnProperty.call(rule, 'clientArr')) {
-      if (!Array.isArray(rule.clientArr) || rule.clientArr.some(id => typeof id !== 'string')) throw new Error('下载器组必须为下载器 ID 数组');
+      if (!Array.isArray(rule.clientArr) || rule.clientArr.some(id => typeof id !== 'string')) throw new Error('下载器列表必须为下载器 ID 数组');
       rule.clientArr = [...new Set(rule.clientArr)];
       // Preserve an unchanged legacy override; changing the group opts into routing.
       if (!(rule.client && rule.clientArr.length === 1 && rule.clientArr[0] === rule.client)) delete rule.client;

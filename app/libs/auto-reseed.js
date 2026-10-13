@@ -3,12 +3,13 @@ const bencode = require('bencode');
 const files = require('./reseed-files');
 const recovery = require('./brush-recovery');
 const store = require('./brush-store');
+const groups = require('./downloader-groups');
 
 async function attempt (task, torrent, rule = {}) {
   if (!task.autoReseed && !task.onlyReseed) return false;
-  const clients = (task.reseedClients || task.clientArr || []).map(id => global.runningClient[id]).filter(c => c && c.status && c.maindata && c._client.type === 'qBittorrent');
-  const allowed = task._rss.reseedRespectRules && (rule.client ? [rule.client] : rule.clientArr && rule.clientArr.length ? rule.clientArr.filter(id => task.clientArr.includes(id)) : null);
-  const candidates = clients.filter(c => !allowed || allowed.includes(c.id)).flatMap(client => client.maindata.torrents.filter(t => +t.size === +torrent.size && recovery.completed(t)).map(source => ({ client, source })));
+  if (task.canRun && !task.canRun()) throw require('./rss-schedule').pausedError();
+  const clients = groups.reseedClients(task, rule).map(id => global.runningClient[id]).filter(c => c && c.status && c.maindata && c._client.type === 'qBittorrent');
+  const candidates = clients.flatMap(client => client.maindata.torrents.filter(t => +t.size === +torrent.size && recovery.completed(t)).map(source => ({ client, source })));
   if (candidates.length) {
     const metadata = await task._downloadTorrent(torrent.url, torrent.hash);
     const info = bencode.decode(fs.readFileSync(metadata.filepath)).info;
@@ -24,7 +25,7 @@ async function attempt (task, torrent, rule = {}) {
       if (mode === 'compatible') {
         if (current.name !== info.name.toString()) continue;
       } else if (!files.sameFiles(expected, await client.getFiles(source.hash))) continue;
-      if (task.stopped) return true;
+      if (task.stopped || (task.canRun && !task.canRun())) throw require('./rss-schedule').pausedError();
       if (task._rss.reseedRespectRules && (task.scrapeFree || task.scrapeHr)) {
         const util = require('./util');
         if ((task.scrapeFree && !await util.scrapeFree(torrent.link, task.cookie)) || (task.scrapeHr && await util.scrapeHr(torrent.link, task.cookie))) {
@@ -33,6 +34,8 @@ async function attempt (task, torrent, rule = {}) {
         }
       }
       // Always add paused; only the recovery worker may start a confirmed seed.
+      if (task.canRun && !task.canRun()) throw require('./rss-schedule').pausedError();
+      if (!groups.reseedClients(task, rule).includes(client.id)) continue;
       await client.addTorrentByTorrentFile(metadata.filepath, metadata.hash, mode === 'fast', task.uploadLimit, task.downloadLimit, current.savePath, task.category, false, true, {
         size,
         rssId: task.id,
@@ -50,6 +53,7 @@ async function attempt (task, torrent, rule = {}) {
     }
   }
   if (task.onlyReseed) {
+    if (task.canRun && !task.canRun()) throw require('./rss-schedule').pausedError();
     const id = task.id + ':' + torrent.hash;
     const old = store.get('wait', id);
     const minutes = Math.min(1440, Math.max(0, Number(task._rss.reseedWaitMinutes) || 0));

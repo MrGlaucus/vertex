@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Client = require('../common/Client');
 const capacity = require('../libs/capacity');
+const groups = require('../libs/downloader-groups');
 
 const util = require('../libs/util');
 function validate (options) {
@@ -23,6 +24,8 @@ class ClientMod {
   };
 
   delete (options) {
+    const usedBy = groups.list().filter(group => group.clientIds.includes(options.id));
+    if (usedBy.length) throw new Error('下载器仍属于以下组，请先调整组成员：' + usedBy.map(group => group.alias).join('、'));
     fs.unlinkSync(path.join(__dirname, '../data/client/', options.id + '.json'));
     if (global.runningClient[options.id]) global.runningClient[options.id].destroy();
     return '删除下载器成功';
@@ -47,6 +50,7 @@ class ClientMod {
     for (const client of clientList) {
       client.capacityMode = client.capacityMode || 'strict';
       client.used = !global.ignoreDependCheck && (rssList.some(item => (item.clientArr || [item.client]).indexOf(client.id) !== -1) ||
+        groups.list().some(group => group.clientIds.includes(client.id)) ||
         rssList.some(item => (item.reseedClients || []).indexOf(client.id) !== -1) ||
         doubanList.some(item => item.client === client.id) ||
         watchList.some(item => item.downloader === client.id));

@@ -20,6 +20,10 @@ function fail (rssId, torrent, clientId, error) {
   const entry = { ...old, id: key(rssId, torrent.hash), rssId, torrent, clientId: clientId || old?.clientId, attempts: old?.attempts || 0, state: 'waiting', nextAt: Date.now() + interval, error: recovery.safeError(error) };
   if (entry.attempts >= 5) entry.state = 'exhausted';
   save(entry);
+  if (store.get('rss-schedule', rssId) && !global.runningRss?.[rssId]) {
+    finish(entry, 'stopped', 'RSS 已到期自动关闭，不再安排重试');
+    return;
+  }
   log(entry, entry.state === 'exhausted' ? 'retryExhausted' : 'retryScheduled', entry.error);
 }
 
@@ -53,6 +57,10 @@ function restart (rssId, hash) {
   log(entry, 'retryScheduled', '用户重新启动重试');
 }
 
+function cancelForRss (rssId, reason) {
+  for (const entry of store.list('rss-retry').filter(entry => entry.rssId === rssId && entry.state === 'waiting')) finish(entry, 'stopped', reason);
+}
+
 async function tick () {
   const entries = store.list('rss-retry').filter(entry => entry.state === 'waiting' && entry.nextAt <= Date.now()).sort((a, b) => a.nextAt - b.nextAt);
   for (const candidate of entries) {
@@ -60,6 +68,7 @@ async function tick () {
     if (!entry || entry.state !== 'waiting' || entry.nextAt > Date.now()) continue;
     const task = global.runningRss?.[entry.rssId];
     if (!task || task.stopped || task.processing || active.has(entry.id)) continue;
+    if (task.canRun && !task.canRun()) continue;
     const client = global.runningClient?.[entry.clientId];
     active.add(entry.id);
     let invoked = false;
@@ -85,6 +94,7 @@ async function tick () {
         if (job.state !== 'failed' || !job.checkedFailure || job.nextAt > Date.now()) continue;
       }
       if (task.processing || task.stopped || global.runningRss?.[entry.rssId] !== task) continue;
+      if (task.canRun && !task.canRun()) continue;
       if (entry.attempts >= 5) {
         entry.state = 'exhausted';
         save(entry);
@@ -96,8 +106,15 @@ async function tick () {
       save(entry);
       log(entry, 'retryStarted', '开始第 ' + entry.attempts + ' / 5 次重试');
       invoked = true;
-      await task.rss([entry.torrent], true);
+      const result = await task.rss([entry.torrent], true);
       const current = get(entry.rssId, entry.torrent.hash);
+      if (result === false && current.state === 'waiting' && current.version === entry.version) {
+        current.attempts--;
+        current.nextAt = Date.now() + interval;
+        save(current);
+        log(current, 'retryDeferred', '定时运行限制暂停处理，不消耗重试次数');
+        continue;
+      }
       // A policy rejection is not an add failure: never bypass current RSS rules.
       if (current.state === 'waiting' && current.version === entry.version) finish(current, 'stopped', '当前规则、免费/HR 检查、容量或推送上限不允许添加');
     } catch (error) {
@@ -116,4 +133,4 @@ async function tick () {
   }
 }
 
-module.exports = { get, fail, success, stop, restart, tick };
+module.exports = { get, fail, success, stop, restart, tick, cancelForRss };

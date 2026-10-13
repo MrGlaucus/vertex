@@ -216,19 +216,54 @@ async function main () {
   const asyncJobs = require('../app/libs/brush-store').list('job').filter(job => job.clientId === asyncClient.id);
   assert.equal(asyncJobs.length, 2);
   assert.equal(asyncJobs.every(job => job.state === 'accepted'), true, '202 Accepted is queued for reconciliation, not treated as an error');
+  const scheduleTasks = global.runningRss;
+  try {
+    let allowed = true;
+    let sent = 0;
+    let freeQueue;
+    const guarded = Object.assign(Object.create(Client.prototype), client(), {
+      client: { addTorrent: async () => { sent++; return { statusCode: 200 }; } }
+    });
+    global.runningRss = { scheduled: { canRun: () => allowed } };
+    const store = require('../app/libs/brush-store');
+    const queue = require('../app/libs/request-limit');
+    const holding = queue.run('add:' + guarded.id, 1, () => new Promise(resolve => { freeQueue = resolve; }));
+    const queuedAdd = guarded.addTorrent('url', 'schedule-queued', false, 0, 0, '', '', false, false, { size: 100, rssId: 'scheduled' });
+    const rejected = assert.rejects(queuedAdd, error => error.code === 'RSS_SCHEDULE_PAUSED');
+    while (!store.get('job', guarded.id + ':schedule-queued')) await new Promise(resolve => setImmediate(resolve));
+    allowed = false;
+    freeQueue();
+    await holding;
+    await rejected;
+    assert.equal(sent, 0, 'time window is checked again after waiting in the downloader request queue');
+    assert.equal(capacity.snapshot(guarded).reserved, 0, 'a request blocked before sending releases its reservation');
+    assert.equal(store.get('job', guarded.id + ':schedule-queued').attempts, 0, 'a blocked send does not consume an add attempt');
+    allowed = true;
+    global.runningRss.scheduled = { canRun: () => true, allowsClient: () => allowed };
+    const groupHolding = queue.run('add:' + guarded.id, 1, () => new Promise(resolve => { freeQueue = resolve; }));
+    const groupAdd = guarded.addTorrent('url', 'group-queued', false, 0, 0, '', '', false, false, { size: 100, rssId: 'scheduled' });
+    const groupRejected = assert.rejects(groupAdd, error => error.code === 'CAPACITY_REJECTED' && /组或规则已变更/.test(error.message));
+    while (!store.get('job', guarded.id + ':group-queued')) await new Promise(resolve => setImmediate(resolve));
+    allowed = false;
+    freeQueue();
+    await groupHolding;
+    await groupRejected;
+    assert.equal(sent, 0, 'removed group members are blocked at final HTTP dispatch');
+    assert.equal(capacity.snapshot(guarded).reserved, 0, 'removed member releases the unexecuted reservation');
+  } finally { global.runningRss = scheduleTasks; }
   const metadata = client();
   capacity.reserve(metadata, 'metadata', 100).accepted();
   metadata.maindata.torrents = [{ hash: 'metadata', size: 0, completed: 0 }];
   assert.equal(capacity.snapshot(metadata).reserved, 1, 'wait for metadata before releasing reserved disk');
 
-  const RuleMod = load('app/model/RssRuleMod.js', { fs: {}, path: {}, '../libs/util': {} });
+  const RuleMod = load('app/model/RssRuleMod.js', { fs: {}, path: {}, '../libs/util': {}, '../libs/downloader-groups': require('../app/libs/downloader-groups') });
   const ruleMod = new RuleMod();
   assert.equal(ruleMod.normalize({ client: 'legacy', clientArr: ['legacy'] }).client, 'legacy');
   assert.equal(ruleMod.normalize({ client: 'legacy', clientArr: ['new'] }).client, undefined);
   assert.equal(ruleMod.normalize({ client: 'legacy', clientArr: [] }).client, undefined);
   assert.throws(() => ruleMod.normalize({ clientArr: 'invalid' }), /数组/);
   assert.throws(() => ruleMod.normalize({ priority: 'invalid' }), /数字/);
-  const ClientMod = load('app/model/ClientMod.js', { fs: {}, path: {}, '../common/Client': Client, '../libs/capacity': capacity, '../libs/util': {} });
+  const ClientMod = load('app/model/ClientMod.js', { fs: {}, path: {}, '../common/Client': Client, '../libs/capacity': capacity, '../libs/util': {}, '../libs/downloader-groups': require('../app/libs/downloader-groups') });
   assert.throws(() => new ClientMod().add({ capacityMode: 'invalid' }), /未知空间计算模式/);
   assert.throws(() => new ClientMod().modify({ capacityMode: 'invalid' }), /未知空间计算模式/);
 
@@ -253,6 +288,8 @@ async function main () {
     '../libs/rss-routing': routing,
     '../libs/auto-reseed': { attempt: async () => false, waiting: () => [] },
     '../libs/rss-retry': require('../app/libs/rss-retry'),
+    '../libs/rss-schedule': require('../app/libs/rss-schedule'),
+    '../libs/downloader-groups': require('../app/libs/downloader-groups'),
     '../libs/brush-recovery': require('../app/libs/brush-recovery'),
     '../libs/brush-store': require('../app/libs/brush-store')
   });

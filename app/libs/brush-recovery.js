@@ -157,10 +157,11 @@ async function tick () {
   if (ticking) return;
   ticking = true;
   try {
-    const jobs = store.list('job').filter(job => !terminal.includes(job.state) && (job.state !== 'failed' || !job.checkedFailure) && job.nextAt <= Date.now() && (!job.rssId || global.runningRss[job.rssId]) && global.runningClient[job.clientId]?.status).sort((a, b) => a.nextAt - b.nextAt).slice(0, 5);
+    const canReconcile = job => !job.rssId || global.runningRss[job.rssId] || store.get('rss-schedule', job.rssId);
+    const jobs = store.list('job').filter(job => !terminal.includes(job.state) && (job.state !== 'failed' || !job.checkedFailure) && job.nextAt <= Date.now() && canReconcile(job) && global.runningClient[job.clientId]?.status).sort((a, b) => a.nextAt - b.nextAt).slice(0, 5);
     for (const job of jobs) {
       if (recovering.has(job.id)) continue;
-      if (job.rssId && !global.runningRss[job.rssId]) continue;
+      if (!canReconcile(job)) continue;
       const client = global.runningClient[job.clientId];
       recovering.add(job.id);
       try {

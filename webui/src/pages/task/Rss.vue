@@ -12,13 +12,23 @@
     >
       <template #title>
         <span style="font-size: 16px; font-weight: bold;">RSS 任务列表</span>
+        <a style="margin-left: 16px;" @click="listRss()">刷新状态</a>
       </template>
       <template #bodyCell="{ column, record }">
         <template v-if="column.dataIndex === 'enable'">
           <a-switch @change="enableTask(record)" v-model:checked="record.enable" checked-children="启用" un-checked-children="禁用"/>
         </template>
+        <template v-if="column.dataIndex === 'scheduleState'">
+          <a-tag :color="scheduleColor(record)">{{ scheduleLabel(record) }}</a-tag>
+          <div v-if="record.scheduleState?.nextAt">下次时段：{{ record.scheduleState.nextAt }}</div>
+          <div v-if="record.dailyWindowEnabled">每日 {{ record.windowStart }} 至{{ record.windowStart > record.windowEnd ? '次日 ' : ' ' }}{{ record.windowEnd }}</div>
+          <div v-if="record.scheduleState?.expiresAt">截止：{{ record.scheduleState.expiresAt }}</div>
+          <div v-if="record.scheduleState?.status === 'outside' && !record.scheduleState?.nextAt">截止前无可运行时段</div>
+        </template>
         <template v-if="column.dataIndex === 'clientArr'">
-          {{ downloaders.filter(item => record.clientArr.indexOf(item.id) !== -1).map(item => item.alias).join(' / ') }}
+          {{ downloaderNames(record) }}
+          <div v-if="record.clientGroupIds?.length" style="font-size: 12px; opacity: .7;">引用组：{{ groupNames(record.clientGroupIds) }}</div>
+          <div v-if="record.reseedGroupIds?.length" style="font-size: 12px; opacity: .7;">辅种组：{{ groupNames(record.reseedGroupIds) }}</div>
         </template>
         <template v-if="column.dataIndex === 'pushNotify'">
           <a-tag color="success" v-if="record.pushNotify">启用</a-tag>
@@ -67,18 +77,41 @@
           :rules="[{ required: true, message: '${label}不可为空! ' }]">
           <a-checkbox v-model:checked="rss.enable">启用</a-checkbox>
         </a-form-item>
+        <a-form-item label="定时运行" extra="时间按服务端时区计算，与浏览器时区无关。时段内仍按 RSS Cron 抓取；时段外暂停抓取、添加重试和等待辅种，已添加种子继续运行。">
+          <div>服务端时区：{{ rssList[0]?.scheduleState?.timezone || '容器 TZ 设置' }}（TZ=Asia/Shanghai 时为北京时间）</div>
+          <a-checkbox v-model:checked="rss.dailyWindowEnabled">每日运行时段</a-checkbox>
+          <div v-if="rss.dailyWindowEnabled" class="schedule-inputs">
+            <a-form-item name="windowStart" :rules="[{ required: true, message: '请选择开始时间' }]">
+              <a-input type="time" v-model:value="rss.windowStart" aria-label="每日开始时间" />
+            </a-form-item>
+            <span>至{{ rss.windowStart > rss.windowEnd ? '次日' : '' }}</span>
+            <a-form-item name="windowEnd" :rules="[{ required: true, message: '请选择结束时间' }]">
+              <a-input type="time" v-model:value="rss.windowEnd" aria-label="每日结束时间" />
+            </a-form-item>
+          </div>
+          <div class="schedule-expiry">
+            <a-checkbox v-model:checked="rss.expireEnabled">到期自动关闭</a-checkbox>
+            <a-form-item v-if="rss.expireEnabled" name="expireAt" :rules="[{ required: true, message: '请选择自动关闭时间' }]">
+              <a-input type="datetime-local" v-model:value="rss.expireAt" aria-label="自动关闭时间" style="max-width: 280px;" />
+            </a-form-item>
+          </div>
+          <div v-if="rss.expireEnabled" class="regex-help">到期后自动取消启用并保存，取消未执行的重试和等待辅种；已经发送的添加请求继续确认结果。重新启用前需修改或清除截止时间。</div>
+        </a-form-item>
         <a-form-item
           label="下载器"
           name="clientArr"
-          extra="选择下载器, 仅可选择已经启用的下载器"
-          :rules="[{ required: true, message: '${label}不可为空! ' }]">
+          extra="可以单独选择下载器，也可以仅引用下方的下载器组。"
+          :rules="[{ validator: validateDownloaders }]">
           <a-checkbox-group style="width: 100%;" v-model:value="rss.clientArr">
             <a-row>
               <a-col v-for="downloader of downloaders" :span="8" :key="downloader.id">
-                <a-checkbox :disabled="!downloader.enable && !rss.clientArr.includes(downloader.id)" v-model:value="downloader.id">{{ downloader.alias }}</a-checkbox>
+                <a-checkbox :disabled="!downloader.enable && !(rss.clientArr || []).includes(downloader.id)" v-model:value="downloader.id">{{ downloader.alias }}</a-checkbox>
               </a-col>
             </a-row>
           </a-checkbox-group>
+        </a-form-item>
+        <a-form-item label="引用下载器组" name="clientGroupIds" extra="作为这个 RSS 任务的普通下载器范围。规则同样引用组时，只在两者交集内分配。">
+          <downloader-group-select v-model:value="rss.clientGroupIds" :groups="downloaderGroups" @refresh="listGroups" />
         </a-form-item>
         <a-form-item
           label="排序规则"
@@ -273,6 +306,9 @@
         <a-form-item v-if="rss.autoReseed || rss.onlyReseed" label="辅种下载器" name="reseedClients">
           <a-select mode="multiple" v-model:value="rss.reseedClients"><a-select-option v-for="client of downloaders.filter(c => c.type === 'qBittorrent')" :key="client.id" :value="client.id">{{ client.alias }}</a-select-option></a-select>
         </a-form-item>
+        <a-form-item v-if="rss.autoReseed || rss.onlyReseed" label="引用辅种下载器组" name="reseedGroupIds" extra="组内仅启用且可用的 qBittorrent 参与辅种；可以只选择组，不必逐个选择下载器。">
+          <downloader-group-select v-model:value="rss.reseedGroupIds" :groups="downloaderGroups" reseed @refresh="listGroups" />
+        </a-form-item>
         <a-form-item v-if="rss.autoReseed || rss.onlyReseed" label="辅种策略" name="reseedMode" extra="安全和兼容模式暂停添加后执行校验；校验失败保持暂停，不自动补下载。快速模式仅用于已确认一致的跨站资源。">
           <a-select v-model:value="rss.reseedMode">
             <a-select-option value="safe">安全：文件路径及大小匹配，再校验</a-select-option>
@@ -424,7 +460,9 @@
   </a-modal>
 </template>
 <script>
+import DownloaderGroupSelect from '@/components/DownloaderGroupSelect';
 export default {
+  components: { DownloaderGroupSelect },
   data () {
     const columns = [
       {
@@ -442,6 +480,10 @@ export default {
         title: '启用',
         dataIndex: 'enable',
         width: 15
+      }, {
+        title: '运行状态 / 定时计划',
+        dataIndex: 'scheduleState',
+        width: 60
       }, {
         title: '下载器',
         dataIndex: 'clientArr',
@@ -488,6 +530,7 @@ export default {
       modalVisible: false,
       rssList: [],
       downloaders: [],
+      downloaderGroups: [],
       notifications: [],
       rssRules: [],
       rss: {},
@@ -496,7 +539,14 @@ export default {
         regexScope: 'xml',
         regexRules: [],
         clientArr: [],
+        clientGroupIds: [],
+        reseedGroupIds: [],
         enable: false,
+        dailyWindowEnabled: false,
+        windowStart: '23:00',
+        windowEnd: '08:00',
+        expireEnabled: false,
+        expireAt: '',
         scrapeFree: false,
         scrapeHr: false,
         autoReseed: false,
@@ -521,6 +571,23 @@ export default {
     };
   },
   methods: {
+    async validateDownloaders () {
+      if (!(this.rss.clientArr || []).length && !(this.rss.clientGroupIds || []).length) throw new Error('请选择下载器或引用下载器组');
+    },
+    async listGroups () {
+      try { this.downloaderGroups = (await this.$api().downloaderGroup.list()).data; } catch (error) { this.$message().error(error.message); }
+    },
+    groupNames (ids) { return (ids || []).map(id => this.downloaderGroups.find(group => group.id === id)?.alias || '已失效：' + id).join(' / '); },
+    downloaderNames (record) {
+      const ids = new Set([...(record.clientArr || []), ...(record.clientGroupIds || []).flatMap(id => this.downloaderGroups.find(group => group.id === id)?.clientIds || [])]);
+      return this.downloaders.filter(client => ids.has(client.id)).map(client => client.alias).join(' / ') || '暂无成员';
+    },
+    scheduleLabel (record) {
+      return { running: '运行中', outside: '时段外暂停', expired: '已到期关闭', disabled: '未启用' }[record.scheduleState?.status] || (record.enable ? '运行中' : '未启用');
+    },
+    scheduleColor (record) {
+      return { running: 'success', outside: 'orange', expired: 'error', disabled: 'default' }[record.scheduleState?.status] || 'default';
+    },
     isMobile () {
       if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
         return true;
@@ -586,14 +653,15 @@ export default {
         setTimeout(() => this.listRss(), 1000);
         this.clearRss();
       } catch (e) {
+        record.enable = !record.enable;
         this.$message().error(e.message);
       }
     },
     modifyClick (row) {
-      this.rss = { ...row, regexScope: row.regexScope || 'download', regexRules: (row.regexRules || []).map(rule => ({ ...rule })) };
+      this.rss = { ...this.defaultRss, ...row, regexScope: row.regexScope || 'download', regexRules: (row.regexRules || []).map(rule => ({ ...rule })) };
     },
     cloneClick (row) {
-      this.rss = JSON.parse(JSON.stringify(row));
+      this.rss = { ...this.defaultRss, ...JSON.parse(JSON.stringify(row)) };
       this.rss.regexScope = row.regexScope || 'download';
       this.rss.regexRules = this.rss.regexRules || [];
       this.rss.id = null;
@@ -614,6 +682,8 @@ export default {
         regexRules: [],
         acceptRules: [],
         clientArr: [],
+        clientGroupIds: [],
+        reseedGroupIds: [],
         rejectRules: [],
         reseedClients: [],
         rssUrls: ['']
@@ -639,8 +709,13 @@ export default {
     this.clearRss();
     this.listNotification();
     this.listDownloader();
+    this.listGroups();
     this.listRssRule();
     this.listRss();
+    this.statusTimer = setInterval(() => { this.listRss(); this.listGroups(); }, 15000);
+  },
+  beforeUnmount () {
+    clearInterval(this.statusTimer);
   }
 };
 </script>
@@ -653,4 +728,7 @@ export default {
 .regex-rule { border: 1px solid rgba(128, 128, 128, .25); padding: 16px; border-radius: 8px; margin-bottom: 12px; }
 .regex-rule-heading { margin-bottom: 16px; }
 .regex-help { margin-top: 10px; opacity: .65; font-size: 13px; }
+.schedule-inputs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin-top: 12px; }
+.schedule-inputs .ant-form-item { margin-bottom: 0; }
+.schedule-expiry { margin-top: 12px; }
 </style>

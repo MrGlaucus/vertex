@@ -3,7 +3,13 @@ const path = require('path');
 const Rss = require('../common/Rss');
 
 const util = require('../libs/util');
-function validate (rssSet) {
+const schedule = require('../libs/rss-schedule');
+const store = require('../libs/brush-store');
+const groups = require('../libs/downloader-groups');
+function validate (rssSet, preview = false) {
+  groups.validateReferences(rssSet.clientGroupIds);
+  groups.validateReferences(rssSet.reseedGroupIds);
+  schedule.validate(rssSet, preview);
   require('../libs/rss-xml-replace').compile(rssSet);
   if (rssSet.reseedMode && !['safe', 'fast', 'compatible'].includes(rssSet.reseedMode)) throw new Error('未知辅种策略');
   if (rssSet.ruleOrder && !['legacy', 'configured'].includes(rssSet.ruleOrder)) throw new Error('未知规则顺序');
@@ -15,6 +21,8 @@ class RssMod {
     const id = util.uuid.v4().split('-')[0];
     const rssSet = { ...options };
     validate(rssSet);
+    delete rssSet.scheduleState;
+    delete rssSet.scheduleExpiredAt;
     rssSet.id = id;
     fs.writeFileSync(path.join(__dirname, '../data/rss/', id + '.json'), JSON.stringify(rssSet, null, 2));
     if (global.runningRss[id]) global.runningRss[id].destroy();
@@ -24,6 +32,7 @@ class RssMod {
 
   delete (options) {
     fs.unlinkSync(path.join(__dirname, '../data/rss/', options.id + '.json'));
+    store.remove('rss-schedule', options.id);
     if (global.runningRss[options.id]) global.runningRss[options.id].destroy();
     return '删除 Rss 成功';
   };
@@ -36,9 +45,14 @@ class RssMod {
   modify (options) {
     const rssSet = { ...options };
     validate(rssSet);
+    delete rssSet.scheduleState;
+    if (rssSet.enable) {
+      delete rssSet.scheduleExpiredAt;
+    }
     rssSet.sameServerClients = rssSet.sameServerClients || [];
-    rssSet.reseedClients = rssSet.reseedClients || rssSet.clientArr || [rssSet.client];
+    // Keep an omitted reseed selection as a live fallback to the task scope.
     fs.writeFileSync(path.join(__dirname, '../data/rss/', options.id + '.json'), JSON.stringify(rssSet, null, 2));
+    if (rssSet.enable) store.remove('rss-schedule', rssSet.id);
     if (global.runningRss[options.id]) global.runningRss[options.id].destroy();
     if (rssSet.enable) global.runningRss[options.id] = new Rss(rssSet);
     return '修改 Rss 成功';
@@ -47,13 +61,15 @@ class RssMod {
   list () {
     const rssList = util.listRss();
     for (const rss of rssList) {
+      rss.scheduleState = schedule.state(rss);
       if (rss.client) {
         rss.clientArr = [rss.client];
         delete rss.client;
       }
       rss.reseedMode = rss.reseedMode || 'compatible';
       rss.ruleOrder = rss.ruleOrder || 'legacy';
-      rss.reseedClients = rss.reseedClients || rss.clientArr || [rss.client];
+      rss.clientArr = rss.clientArr || [];
+      if (!rss.reseedClients && !(rss.clientGroupIds || []).length && !(rss.reseedGroupIds || []).length) rss.reseedClients = rss.clientArr || [rss.client];
       rss.acceptRules = rss.acceptRules || [];
       rss.rejectRules = rss.rejectRules || [];
     }
@@ -63,7 +79,7 @@ class RssMod {
   async dryrun (options) {
     const id = util.uuid.v4().split('-')[0];
     const rssSet = { ...options };
-    validate(rssSet);
+    validate(rssSet, true);
     rssSet.id = id;
     rssSet.dryrun = true;
     const rss = new Rss(rssSet);
@@ -83,6 +99,7 @@ class RssMod {
   async mikanPush (options) {
     const rssList = util.listRss();
     const rssSet = rssList.filter(item => item.id === options.rss)[0];
+    if (!rssSet || !schedule.state(rssSet).allowed) throw new Error('RSS 未启用、不在运行时段内或已到期关闭');
     rssSet.dryrun = true;
     const rss = new Rss(rssSet);
     rss.rss(options.torrents);

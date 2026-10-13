@@ -4,6 +4,7 @@ import site from './site';
 import setting from './setting';
 import notification from './notification';
 import downloader from './downloader';
+import downloaderGroup from './downloaderGroup';
 import deleteRule from './deleteRule';
 import linkRule from './linkRule';
 import rssRule from './rssRule';
@@ -19,6 +20,7 @@ const api = {
   user,
   setting,
   downloader,
+  downloaderGroup,
   server,
   site,
   notification,

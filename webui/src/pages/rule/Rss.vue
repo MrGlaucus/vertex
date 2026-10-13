@@ -24,6 +24,9 @@
             </template>
           </a-select>
         </template>
+        <template v-if="column.dataIndex === 'clientGroupIds'">
+          <downloader-group-select :value="record.clientGroupIds" :groups="downloaderGroups" @refresh="listGroups" @update:value="value => updateGroups(record, value)" />
+        </template>
         <template v-if="column.title === '操作'">
           <span>
             <a @click="cloneClick(record)">克隆</a>
@@ -73,7 +76,7 @@
           <a-input size="small" v-model:value="rssRule.savePath"/>
         </a-form-item>
         <a-form-item
-          label="下载器组"
+          label="单独选择下载器"
           name="clientArr"
           extra="留空沿用 RSS 下载器；多选时仅在与 RSS 下载器列表的交集内分配，无可用机器不回退。旧单下载器配置保持原行为，编辑组后使用新分流规则。">
           <a-select size="small" :allowClear="true" mode="multiple" v-model:value="rssRule.clientArr">
@@ -84,6 +87,9 @@
               </a-select-option>
             </template>
           </a-select>
+        </a-form-item>
+        <a-form-item label="引用下载器组" name="clientGroupIds" extra="从基础组件引用统一维护的组。规则目标与 RSS 任务下载器范围取交集；引用空组或没有可用成员时不会回退组外。">
+          <downloader-group-select v-model:value="rssRule.clientGroupIds" :groups="downloaderGroups" @refresh="listGroups" />
         </a-form-item>
         <a-form-item
           label="优先级"
@@ -164,7 +170,9 @@
   </div>
 </template>
 <script>
+import DownloaderGroupSelect from '@/components/DownloaderGroupSelect';
 export default {
+  components: { DownloaderGroupSelect },
   data () {
     const columns = [
       {
@@ -180,9 +188,13 @@ export default {
         defaultSortOrder: 'ascend',
         width: 30
       }, {
-        title: '下载器组',
+        title: '单独选择下载器',
         dataIndex: 'downloader',
         width: 20
+      }, {
+        title: '引用下载器组',
+        dataIndex: 'clientGroupIds',
+        width: 40
       }, {
         title: '操作',
         width: 20
@@ -228,6 +240,7 @@ export default {
       rssRule: {},
       defaultRssRule: {
         clientArr: [],
+        clientGroupIds: [],
         conditions: [{
           key: '',
           compareType: '',
@@ -241,10 +254,18 @@ export default {
       },
       loading: true,
       downloaders: [],
+      downloaderGroups: [],
       rssRuleList: []
     };
   },
   methods: {
+    async listGroups () {
+      try { this.downloaderGroups = (await this.$api().downloaderGroup.list()).data; } catch (error) { this.$message().error(error.message); }
+    },
+    async updateGroups (record, value) {
+      record.clientGroupIds = value;
+      await this.modifyRssRuleDownloader(record);
+    },
     isMobile () {
       if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
         return true;
@@ -255,7 +276,7 @@ export default {
     async listRssRule () {
       try {
         const res = await this.$api().rssRule.list();
-        this.rssRuleList = res.data.map(rule => ({ ...rule, clientArr: rule.clientArr || (rule.client ? [rule.client] : []) }));
+        this.rssRuleList = res.data.map(rule => ({ ...rule, clientArr: rule.clientArr || (rule.client ? [rule.client] : []), clientGroupIds: rule.clientGroupIds || [] }));
       } catch (e) {
         this.$message().error(e.message);
       }
@@ -268,6 +289,7 @@ export default {
         this.clearRssRule();
       } catch (e) {
         this.$message().error(e.message);
+        await this.listRssRule();
       }
     },
     async modifyRssRule () {
@@ -308,13 +330,18 @@ export default {
       }
     },
     clearRssRule () {
-      this.rssRule = { ...this.defaultRssRule, conditions: [{ ...this.condition }] };
+      this.rssRule = { ...this.defaultRssRule, clientArr: [], clientGroupIds: [], conditions: [{ ...this.condition }] };
     }
   },
   async mounted () {
     this.clearRssRule();
     this.listDownloader();
+    this.listGroups();
+    window.addEventListener('focus', this.listGroups);
     await this.listRssRule();
+  },
+  beforeUnmount () {
+    window.removeEventListener('focus', this.listGroups);
   }
 };
 </script>
