@@ -293,7 +293,7 @@
         <a-form-item
           label="最长休眠时间"
           name="maxSleepTime"
-          extra="距上次成功获取超过此秒数，恢复时跳过本轮新候选；建议设为 RSS 周期的 3–5 倍。正常重启后的首次成功获取不触发，获取失败不刷新成功时间，重试任务不受此限制。"
+          extra="仅限制普通下载：距上次成功获取 RSS 超过此秒数，恢复时仍先尝试辅种，未命中则跳过本轮普通下载。仅辅种及辅种等待候选不受此限制；多久未成功辅种不影响计时。建议设为 RSS 周期的 3–5 倍；正常重启首次成功获取、定时暂停恢复和重试任务不受此限制。"
           :rules="[{ required: true, message: '${label}不可为空! ' }]">
           <a-input size="small" v-model:value="rss.maxSleepTime"/>
         </a-form-item>

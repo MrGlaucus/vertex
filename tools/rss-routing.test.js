@@ -66,6 +66,9 @@ async function main () {
   a.maindata.leechingCount = 1;
   assert.equal(capacity.snapshot(a).reserved, 0, 'observed hash reconciles reservation');
   assert.equal(capacity.snapshot(a).count, 1, 'no double count');
+  assert.equal(capacity.duplicate(a, 'HASH'), 'existing');
+  assert.match(capacity.reason(a, 100, { hash: 'HASH' }), /已存在于下载器/);
+  assert.doesNotMatch(capacity.reason(a, 100, { hash: 'HASH' }), /等待/);
 
   const space = client({ _client: { capacityGuard: true }, minFreeSpace: 100 });
   space.maindata.torrents = [{ hash: 'existing', size: 400, completed: 100 }];
@@ -122,6 +125,7 @@ async function main () {
 
   let currentUnix = 1000;
   const moment = () => ({ unix: () => currentUnix });
+  moment.unix = require('moment').unix;
   const logger = { info () {}, debug () {}, error () {} };
   let release;
   let requests = 0;
@@ -272,6 +276,7 @@ async function main () {
   let fetchedOptions;
   let fetchFailure;
   let emptyFeed = false;
+  const autoReseed = { attempt: async () => false, waiting: () => [] };
   const torrent = { name: 'example', size: 100, hash: 'rss-test', link: 'link' };
   const Rss = load('app/common/Rss.js', {
     '../libs/rss': { getTorrents: async (url, settings, options) => { fetchedSettings = settings; fetchedOptions = options; if (fetchFailure) throw fetchFailure; return emptyFeed ? [] : [{ ...torrent }]; } },
@@ -279,14 +284,13 @@ async function main () {
     '../libs/logger': logger,
     '../libs/redis': {},
     'node-cron': {},
-    bencode: {},
-    crypto: {},
+    '../libs/torrent-response': require('../app/libs/torrent-response'),
     fs: {},
     path: {},
     moment,
     './Push': {},
     '../libs/rss-routing': routing,
-    '../libs/auto-reseed': { attempt: async () => false, waiting: () => [] },
+    '../libs/auto-reseed': autoReseed,
     '../libs/rss-retry': require('../app/libs/rss-retry'),
     '../libs/rss-schedule': require('../app/libs/rss-schedule'),
     '../libs/downloader-groups': require('../app/libs/downloader-groups'),
@@ -347,6 +351,10 @@ async function main () {
       fetchFailure = null;
       await lifecycle.rss();
       assert.equal(lifecycleAdds, 2, 'long RSS outage still rejects the first recovered batch');
+      const outageNote = records[records.length - 1][1][7];
+      assert.match(outageNote, /上次成功获取: \d{4}-\d{2}-\d{2}/);
+      assert.match(outageNote, /本次成功获取: \d{4}-\d{2}-\d{2}/);
+      assert.match(outageNote, /实际间隔: 190 秒；配置阈值: 120 秒/);
       assert.equal(lifecycle.lastRssTime, currentUnix);
       currentUnix += 30;
       await lifecycle.rss();
@@ -364,6 +372,8 @@ async function main () {
       fetchFailure = null;
       await lifecycle.rss();
       assert.equal(lifecycleAdds, beforeRecovery, 'startup with prolonged fetch errors is distinguished from a healthy restart');
+      assert.match(records[records.length - 1][1][7], /上次成功获取: 无（启动后尚未成功）；首次获取失败:/);
+      assert.match(records[records.length - 1][1][7], /实际间隔: 121 秒/);
       currentUnix += 30;
       emptyFeed = true;
       await lifecycle.rss();
@@ -375,6 +385,80 @@ async function main () {
     } finally {
       currentUnix = 1000;
       fetchFailure = null;
+      emptyFeed = false;
+    }
+    const reseedStore = require('../app/libs/brush-store');
+    const realReseed = require('../app/libs/auto-reseed');
+    const reseedAttempts = [];
+    let ordinaryAdds = 0;
+    const sleepNotices = [];
+    const afterOutage = Object.assign(Object.create(Rss.prototype), rss, {
+      id: 'sleep-only-reseed',
+      _rss: { reseedWaitMinutes: 60, reseedRespectRules: true },
+      onlyReseed: true,
+      acceptRules: [],
+      lastRssTime: 1000,
+      _pushTorrent: async () => { ordinaryAdds++; },
+      ntf: { rejectTorrent: async (...args) => sleepNotices.push(args[3]) }
+    });
+    try {
+      currentUnix = 2000;
+      autoReseed.attempt = async (...args) => { reseedAttempts.push(args[1].hash); return realReseed.attempt(...args); };
+      autoReseed.waiting = realReseed.waiting;
+      const beforeReseedHistory = records.length;
+      await afterOutage.rss();
+      assert.equal(reseedAttempts.length, 1, 'only-reseed still attempts matching after a long RSS gap');
+      const waitId = afterOutage.id + ':' + torrent.hash;
+      assert.ok(reseedStore.get('wait', waitId), 'unmatched candidate is retained for reseeding instead of rejected');
+      emptyFeed = true;
+      currentUnix += 1000;
+      await afterOutage.rss();
+      assert.equal(reseedAttempts.length, 2, 'saved waiting candidate is checked even when the recovered feed is empty');
+      assert.ok(reseedStore.get('wait', waitId));
+      assert.equal(records.length, beforeReseedHistory, 'no permanent rejection history for waiting reseeds');
+      assert.equal(sleepNotices.length, 0);
+      assert.equal(ordinaryAdds, 0);
+
+      emptyFeed = false;
+      autoReseed.attempt = async () => { reseedAttempts.push('matched'); return true; };
+      afterOutage.id = 'sleep-auto-reseed';
+      afterOutage.onlyReseed = false;
+      afterOutage.autoReseed = true;
+      afterOutage.lastRssTime = 1000;
+      await afterOutage.rss();
+      assert.equal(reseedAttempts[2], 'matched', 'automatic reseed is tried before the ordinary download sleep guard');
+      assert.equal(records.length, beforeReseedHistory);
+      assert.equal(ordinaryAdds, 0);
+
+      autoReseed.attempt = async () => false;
+      afterOutage.id = 'sleep-fallback';
+      afterOutage.lastRssTime = 1000;
+      await afterOutage.rss();
+      assert.equal(ordinaryAdds, 0, 'unmatched auto-reseed cannot fall back to ordinary downloading after an outage');
+      assert.match(records[records.length - 1][1][7], /最长休眠时间.*实际间隔: 2000 秒；配置阈值: 120 秒/);
+      assert.equal(sleepNotices[0], records[records.length - 1][1][7], 'notification and persisted history carry identical timing diagnostics');
+
+      afterOutage.id = 'sleep-reject-rule';
+      afterOutage.onlyReseed = true;
+      afterOutage.lastRssTime = 1000;
+      afterOutage.rejectRules = [{ alias: '拒绝优先' }];
+      autoReseed.attempt = async () => { assert.fail('reject rules must run before reseeding'); };
+      await afterOutage.rss();
+      assert.match(records[records.length - 1][1][7], /拒绝规则: 拒绝优先/);
+      afterOutage.id = 'sleep-accept-rule';
+      afterOutage.lastRssTime = 1000;
+      afterOutage.rejectRules = [];
+      afterOutage.acceptRules = [{ alias: '必须匹配' }];
+      afterOutage._fitRule = () => false;
+      await afterOutage.rss();
+      assert.match(records[records.length - 1][1][7], /不符合所有选择规则/);
+      assert.doesNotMatch(records[records.length - 1][1][7], /最长休眠/);
+      assert.equal(ordinaryAdds, 0, 'only-reseed never reaches ordinary download fallback');
+    } finally {
+      autoReseed.attempt = async () => false;
+      autoReseed.waiting = () => [];
+      for (const entry of reseedStore.list('wait').filter(entry => entry.rssId === 'sleep-only-reseed')) reseedStore.remove('wait', entry.id);
+      currentUnix = 1000;
       emptyFeed = false;
     }
     records = [];
@@ -468,6 +552,82 @@ async function main () {
       assert.equal(adds, before, 'late accepted timeout must never be sent again');
       assert.equal(retryQueue.get(retryTask.id, late.hash).state, 'done');
       target = undefined;
+
+      // Reproduce an older checked failure whose target appears later. Previously
+      // every feed scan bypassed history and emitted the same rejection forever.
+      const recovery = require('../app/libs/brush-recovery');
+      const orphan = { ...retryTorrent, hash: 'legacy-late-target' };
+      const orphanJob = recovery.begin(retryClient, orphan.hash, { size: 100 }, { rssId: retryTask.id, feedHash: orphan.hash });
+      recovery.failed(orphanJob, new Error('old timeout'), false);
+      clock += 30000;
+      await recovery.checkRetry(orphanJob.id, retryClient);
+      assert.equal(recovery.forFeed(retryTask.id, orphan.hash).checkedFailure, true);
+      target = { hash: orphan.hash, size: 100 };
+      retryClient.maindata.torrents = [target];
+      let rejections = 0;
+      retryTask.ntf.rejectTorrent = async () => { rejections++; };
+      const beforeOrphan = adds;
+      for (let i = 0; i < 15; i++) await retryTask.rss([orphan]);
+      assert.equal(rejections, 0, 'feed scans never report a late existing target as repeated rejection');
+      assert.equal(retryQueue.get(retryTask.id, orphan.hash).state, 'waiting', 'legacy retry restored exactly once');
+      clock += 30000;
+      await retryQueue.tick();
+      assert.equal(recovery.forFeed(retryTask.id, orphan.hash).state, 'done', 'real lookup closes the old failure');
+      assert.equal(retryQueue.get(retryTask.id, orphan.hash).state, 'done');
+      assert.equal(adds, beforeOrphan, 'legacy migration never resends an existing torrent');
+      for (let i = 0; i < 15; i++) await retryTask.rss([orphan]);
+      assert.equal(rejections, 0);
+      target = undefined;
+      retryClient.maindata.torrents = [];
+
+      const exhaustedOrphan = { ...orphan, hash: 'legacy-exhausted' };
+      retryQueue.restore(retryTask.id, exhaustedOrphan, { ...orphanJob, state: 'failed', checkedFailure: true, attempts: 6 });
+      assert.equal(retryQueue.get(retryTask.id, exhaustedOrphan.hash).state, 'exhausted', 'migration preserves the five-retry limit');
+      const partialOrphan = { ...orphan, hash: 'legacy-partial' };
+      retryQueue.restore(retryTask.id, partialOrphan, { ...orphanJob, state: 'failed', checkedFailure: true, attempts: 4 });
+      assert.equal(retryQueue.get(retryTask.id, partialOrphan.hash).attempts, 3, 'initial request is not counted as a retry');
+      retryQueue.stop(retryQueue.get(retryTask.id, partialOrphan.hash).id);
+
+      const already = { ...orphan, hash: 'existing-without-job' };
+      retryClient.maindata.torrents = [{ hash: already.hash.toUpperCase(), size: 100 }];
+      await retryTask.rss([already]);
+      assert.equal(rejections, 0, 'existing torrents are skipped without rejection notifications');
+      assert.match(records[records.length - 1][1][7], /跳过重复添加/);
+      assert.equal(adds, beforeOrphan);
+      retryClient.maindata.torrents = [];
+
+      const pendingTorrent = { ...orphan, hash: 'pending-without-job' };
+      const pendingSlot = capacity.reserve(retryClient, pendingTorrent.hash, 100);
+      pendingSlot.uncertain();
+      const beforePendingHistory = records.length;
+      for (let i = 0; i < 15; i++) await retryTask.rss([pendingTorrent]);
+      assert.equal(rejections, 0, 'pending confirmations do not produce rejection spam');
+      assert.equal(records.length, beforePendingHistory, 'pending is not recorded as permanently rejected');
+      retryQueue.fail(retryTask.id, pendingTorrent, retryClient.id, new Error('metadata failure'));
+      clock += 30000;
+      await retryQueue.tick();
+      assert.equal(retryQueue.get(retryTask.id, pendingTorrent.hash).state, 'waiting');
+      assert.equal(retryQueue.get(retryTask.id, pendingTorrent.hash).attempts, 0, 'waiting for another addition does not consume retries');
+      retryClient.maindata.torrents = [{ hash: pendingTorrent.hash, size: 100 }];
+      clock += 30000;
+      await retryQueue.tick();
+      assert.equal(retryQueue.get(retryTask.id, pendingTorrent.hash).state, 'done');
+      assert.equal(rejections, 0);
+      assert.equal(adds, beforeOrphan);
+      pendingSlot.release();
+      retryClient.maindata.torrents = [];
+
+      const rejectedTorrent = { ...orphan, hash: 'deduplicated-rejection' };
+      retryTask.rejectRules = [{ alias: '拒绝规则' }];
+      for (let i = 0; i < 15; i++) await retryTask.rss([rejectedTorrent], true);
+      assert.equal(rejections, 1, 'repeated policy rejections notify only once per RSS and hash');
+      const recreatedTask = Object.assign(Object.create(Rss.prototype), retryTask);
+      await recreatedTask.rss([{ ...rejectedTorrent, hash: rejectedTorrent.hash.toUpperCase() }], true);
+      assert.equal(rejections, 1, 'notification deduplication survives task recreation and hash casing');
+      recreatedTask.id = 'another-rss-notice';
+      await recreatedTask.rss([rejectedTorrent], true);
+      assert.equal(rejections, 2, 'different RSS tasks retain independent notifications');
+      retryTask.rejectRules = [];
 
       const eventual = { ...retryTorrent, hash: 'retry-success' };
       await retryTask.rss([eventual]);

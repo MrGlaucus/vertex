@@ -39,6 +39,16 @@ function success (rssId, hash) {
   if (entry && entry.state === 'waiting') finish(entry, 'done', '添加请求已接受');
 }
 
+// Older recovery jobs may predate the retry queue. Preserve their attempt budget
+// and let tick perform a fresh lookup instead of retrying from every RSS scan.
+function restore (rssId, torrent, job) {
+  if (get(rssId, torrent.hash) || job.state !== 'failed' || !job.checkedFailure) return;
+  const attempts = Math.max(0, (job.attempts || 1) - 1);
+  const entry = { id: key(rssId, torrent.hash), rssId, torrent, clientId: job.clientId, attempts, state: attempts >= 5 ? 'exhausted' : 'waiting', nextAt: Math.max(Date.now() + interval, job.nextAt || 0), error: job.error };
+  save(entry);
+  log(entry, entry.state === 'exhausted' ? 'retryExhausted' : 'retryScheduled', '旧添加任务转入统一重试队列，重试前实时查询原下载器');
+}
+
 function stop (id) {
   if (active.has(id)) throw new Error('重试正在处理，请稍后停止');
   const entry = store.get('rss-retry', id);
@@ -112,7 +122,7 @@ async function tick () {
         current.attempts--;
         current.nextAt = Date.now() + interval;
         save(current);
-        log(current, 'retryDeferred', '定时运行限制暂停处理，不消耗重试次数');
+        log(current, 'retryDeferred', '处理暂缓（定时限制或等待添加确认），不消耗重试次数');
         continue;
       }
       // A policy rejection is not an add failure: never bypass current RSS rules.
@@ -133,4 +143,4 @@ async function tick () {
   }
 }
 
-module.exports = { get, fail, success, stop, restart, tick, cancelForRss };
+module.exports = { get, fail, success, restore, stop, restart, tick, cancelForRss };

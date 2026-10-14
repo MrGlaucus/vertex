@@ -29,7 +29,7 @@ function select (task, torrent, rule = {}, clients = {}) {
       if ((task.maxClientUploadSpeed > 0 && client.avgUploadSpeed >= task.maxClientUploadSpeed) || (client.maxUploadSpeed > 0 && upload >= client.maxUploadSpeed)) reason = '达到上传速度上限';
       if ((task.maxClientDownloadSpeed > 0 && client.avgDownloadSpeed >= task.maxClientDownloadSpeed) || (client.maxDownloadSpeed > 0 && download >= client.maxDownloadSpeed)) reason = '达到下载速度上限';
     }
-    return { id, alias: client ? client.alias : id, reason, temporary: !!reason && capacity.isUnavailable(client) };
+    return { id, alias: client ? client.alias : id, reason, duplicate: capacity.duplicate(client, torrent.hash), temporary: !!reason && capacity.isUnavailable(client) };
   });
   const available = candidates.filter(c => !c.reason).map(c => clients[c.id]);
   const metric = client => {
@@ -42,6 +42,7 @@ function select (task, torrent, rule = {}, clients = {}) {
   return {
     client: available[0],
     candidates,
+    duplicate: !available.length && (candidates.find(c => c.duplicate === 'existing') || candidates.find(c => c.duplicate === 'pending')),
     temporary: !available.length && candidates.some(c => c.temporary),
     reason: available.length ? '' : (group ? '规则下载器组无可用机器，不回退组外' : '无可用下载器') + (candidates.length ? ': ' + candidates.map(c => `${c.alias}: ${c.reason}`).join('; ') : '（请检查规则组与 RSS 下载器列表）')
   };

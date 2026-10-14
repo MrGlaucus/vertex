@@ -38,11 +38,19 @@ function isUnavailable (client) {
   return !!client && !client.stopped && (!client.status || !client.maindata || (client._client.capacityGuard && (!client.capacityUpdatedAt || Date.now() - client.capacityUpdatedAt > (Number(client._client.capacityMaxAge) || 120) * 1000)));
 }
 
+function duplicate (client, hash) {
+  if (!hash || !client || client.stopped || !client.status || !client.maindata) return '';
+  if ((client.maindata.torrents || []).some(t => keyOf(t.hash) === keyOf(hash))) return 'existing';
+  return pending(client).has(keyOf(hash)) ? 'pending' : '';
+}
+
 function reason (client, size = 0, options = {}) {
   if (!client || client.stopped) return '下载器未启用或已停止';
   if (!client.status || !client.maindata) return client.lastStateError ? '下载器状态读取失败: ' + client.lastStateError : '下载器状态尚未就绪（等待登录或种子列表）';
   const view = snapshot(client);
-  if (options.hash && (pending(client).has(keyOf(options.hash)) || (client.maindata.torrents || []).some(t => keyOf(t.hash) === keyOf(options.hash)))) return '种子已存在或正在添加，等待下载器确认';
+  const state = duplicate(client, options.hash);
+  if (state === 'existing') return '种子已存在于下载器，跳过重复添加';
+  if (state === 'pending') return '种子正在添加，等待下载器确认';
   if (client._client.maxTorrentNum > 0 && (client.maindata.torrents || []).length + pending(client).size >= client._client.maxTorrentNum) return '达到下载器总种子数量上限';
   if (options.reseed) return '';
   if (client.maxLeechNum > 0 && view.count >= client.maxLeechNum) return '达到下载器最大下载数量（含预占）';
@@ -79,4 +87,4 @@ function reserve (client, hash, size, options = {}) {
   };
 }
 
-module.exports = { snapshot, reason, reserve, releaseHash, isUnavailable };
+module.exports = { snapshot, reason, reserve, releaseHash, isUnavailable, duplicate };
