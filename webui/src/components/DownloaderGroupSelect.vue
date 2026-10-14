@@ -1,10 +1,7 @@
 <template>
   <div>
-    <a-select mode="multiple" :value="value || []" placeholder="选择已维护的下载器组" style="width: 100%;" allow-clear option-filter-prop="label"
-      @update:value="$emit('update:value', $event)" @dropdownVisibleChange="open => open && $emit('refresh')">
-      <a-select-option v-for="group in groups" :key="group.id" :value="group.id" :label="group.alias">{{ group.alias }}（{{ group.clientIds.length }} 台）</a-select-option>
-      <a-select-option v-for="id in missing" :key="id" :value="id" :label="id">已失效的组：{{ id }}</a-select-option>
-    </a-select>
+    <responsive-multi-select :value="value" :options="options" placeholder="选择已维护的下载器组" title="选择下载器组"
+      @update:value="$emit('update:value', $event)" @open="$emit('refresh')" />
     <div v-for="id in value || []" :key="id" class="group-preview">
       {{ groupName(id) }}：{{ members(id) || '没有可用成员' }}
     </div>
@@ -13,7 +10,9 @@
   </div>
 </template>
 <script>
+import ResponsiveMultiSelect from './ResponsiveMultiSelect';
 export default {
+  components: { ResponsiveMultiSelect },
   props: {
     value: { type: Array, default: () => [] },
     groups: { type: Array, default: () => [] },
@@ -21,6 +20,7 @@ export default {
   },
   emits: ['update:value', 'refresh'],
   computed: {
+    options () { return this.groups.map(group => ({ value: group.id, label: group.alias, description: `${group.clientIds.length} 台 · ${this.members(group.id) || '没有可用成员'}` })); },
     missing () { return (this.value || []).filter(id => !this.groups.some(group => group.id === id)); }
   },
   methods: {
@@ -32,6 +32,6 @@ export default {
 };
 </script>
 <style scoped>
-.group-preview, .group-help { margin-top: 6px; font-size: 12px; opacity: .75; }
+.group-preview, .group-help { margin-top: 6px; font-size: 12px; opacity: .75; overflow-wrap: anywhere; }
 .group-error { color: #ff4d4f; margin-top: 6px; }
 </style>

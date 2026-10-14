@@ -8,21 +8,14 @@
       size="small"
       :data-source="rssRuleList"
       :pagination="false"
-      :scroll="{ x: 640 }"
+      :scroll="{ x: 940 }"
     >
       <template #title>
         <span style="font-size: 16px; font-weight: bold;">RSS 规则列表</span>
       </template>
       <template #bodyCell="{ column, record }">
         <template v-if="column.dataIndex === 'downloader'">
-          <a-select size="small" :allowClear="true" mode="multiple" v-model:value="record.clientArr" style="width: 100%;" @change="modifyRssRuleDownloader(record)">
-            <template v-for="downloader of downloaders" :key="downloader.id">
-              <a-select-option
-                :value="downloader.id">
-                {{ downloader.alias }}
-              </a-select-option>
-            </template>
-          </a-select>
+          <responsive-multi-select size="small" v-model:value="record.clientArr" :options="downloaders.map(client => ({ value: client.id, label: client.alias }))" placeholder="选择下载器" @change="modifyRssRuleDownloader(record)" />
         </template>
         <template v-if="column.dataIndex === 'clientGroupIds'">
           <downloader-group-select :value="record.clientGroupIds" :groups="downloaderGroups" @refresh="listGroups" @update:value="value => updateGroups(record, value)" />
@@ -79,14 +72,7 @@
           label="单独选择下载器"
           name="clientArr"
           extra="留空沿用 RSS 下载器；多选时仅在与 RSS 下载器列表的交集内分配，无可用机器不回退。旧单下载器配置保持原行为，编辑组后使用新分流规则。">
-          <a-select size="small" :allowClear="true" mode="multiple" v-model:value="rssRule.clientArr">
-            <template v-for="downloader of downloaders" :key="downloader.id">
-              <a-select-option
-                :value="downloader.id">
-                {{ downloader.alias }}
-              </a-select-option>
-            </template>
-          </a-select>
+          <responsive-multi-select size="small" v-model:value="rssRule.clientArr" :options="downloaders.map(client => ({ value: client.id, label: client.alias }))" placeholder="选择下载器" />
         </a-form-item>
         <a-form-item label="引用下载器组" name="clientGroupIds" extra="从基础组件引用统一维护的组。规则目标与 RSS 任务下载器范围取交集；引用空组或没有可用成员时不会回退组外。">
           <downloader-group-select v-model:value="rssRule.clientGroupIds" :groups="downloaderGroups" @refresh="listGroups" />
@@ -171,14 +157,15 @@
 </template>
 <script>
 import DownloaderGroupSelect from '@/components/DownloaderGroupSelect';
+import ResponsiveMultiSelect from '@/components/ResponsiveMultiSelect';
 export default {
-  components: { DownloaderGroupSelect },
+  components: { DownloaderGroupSelect, ResponsiveMultiSelect },
   data () {
     const columns = [
       {
         title: 'ID',
         dataIndex: 'id',
-        width: 18,
+        width: 100,
         sorter: (a, b) => a.id.localeCompare(b.id),
         fixed: true
       }, {
@@ -186,18 +173,18 @@ export default {
         dataIndex: 'alias',
         sorter: (a, b) => a.alias.localeCompare(b.alias),
         defaultSortOrder: 'ascend',
-        width: 30
+        width: 150
       }, {
         title: '单独选择下载器',
         dataIndex: 'downloader',
-        width: 20
+        width: 240
       }, {
         title: '引用下载器组',
         dataIndex: 'clientGroupIds',
-        width: 40
+        width: 300
       }, {
         title: '操作',
-        width: 20
+        width: 150
       }
     ];
     const conditionColumns = [

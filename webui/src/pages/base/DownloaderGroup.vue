@@ -26,17 +26,16 @@
     <a-form :model="group" layout="vertical" @finish="save">
       <a-form-item label="组名称" name="alias" :rules="[{ required: true, whitespace: true, message: '请输入组名称' }]"><a-input v-model:value="group.alias" :maxlength="80" placeholder="例如：大容量 HDD、日常刷流、辅种机器" /></a-form-item>
       <a-form-item label="组成员" name="clientIds" extra="可以保留空组。未启用或离线下载器不会参与实际分配；辅种只使用 qBittorrent。">
-        <a-select mode="multiple" v-model:value="group.clientIds" placeholder="选择下载器" allow-clear option-filter-prop="label">
-          <a-select-option v-for="client in clients" :key="client.id" :value="client.id" :label="client.alias">{{ client.alias }} · {{ client.type }}{{ client.enable ? '' : '（未启用）' }}</a-select-option>
-          <a-select-option v-for="id in missingMembers" :key="id" :value="id">{{ id }}（已删除，请移除）</a-select-option>
-        </a-select>
+        <responsive-multi-select v-model:value="group.clientIds" :options="clientOptions" placeholder="选择下载器" title="选择组成员" />
       </a-form-item>
       <a-form-item><a-space><a-button type="primary" html-type="submit" :loading="saving">保存下载器组</a-button><a-button @click="clear">清空</a-button></a-space></a-form-item>
     </a-form>
   </div>
 </template>
 <script>
+import ResponsiveMultiSelect from '@/components/ResponsiveMultiSelect';
 export default {
+  components: { ResponsiveMultiSelect },
   data () {
     return {
       groups: [],
@@ -47,7 +46,7 @@ export default {
     };
   },
   computed: {
-    missingMembers () { return this.group.clientIds.filter(id => !this.clients.some(client => client.id === id)); }
+    clientOptions () { return this.clients.map(client => ({ value: client.id, label: client.alias, description: client.type + (client.enable ? '' : '（未启用）') })); }
   },
   methods: {
     async load () {

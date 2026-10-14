@@ -104,7 +104,7 @@
           :rules="[{ validator: validateDownloaders }]">
           <a-checkbox-group style="width: 100%;" v-model:value="rss.clientArr">
             <a-row>
-              <a-col v-for="downloader of downloaders" :span="8" :key="downloader.id">
+              <a-col v-for="downloader of downloaders" :xs="24" :sm="12" :md="8" :key="downloader.id">
                 <a-checkbox :disabled="!downloader.enable && !(rss.clientArr || []).includes(downloader.id)" v-model:value="downloader.id">{{ downloader.alias }}</a-checkbox>
               </a-col>
             </a-row>
@@ -304,7 +304,7 @@
           <a-checkbox v-model:checked="rss.onlyReseed">仅辅种</a-checkbox>
         </a-form-item>
         <a-form-item v-if="rss.autoReseed || rss.onlyReseed" label="辅种下载器" name="reseedClients">
-          <a-select mode="multiple" v-model:value="rss.reseedClients"><a-select-option v-for="client of downloaders.filter(c => c.type === 'qBittorrent')" :key="client.id" :value="client.id">{{ client.alias }}</a-select-option></a-select>
+          <responsive-multi-select v-model:value="rss.reseedClients" :options="downloaders.filter(c => c.type === 'qBittorrent').map(client => ({ value: client.id, label: client.alias }))" placeholder="选择辅种下载器" />
         </a-form-item>
         <a-form-item v-if="rss.autoReseed || rss.onlyReseed" label="引用辅种下载器组" name="reseedGroupIds" extra="组内仅启用且可用的 qBittorrent 参与辅种；可以只选择组，不必逐个选择下载器。">
           <downloader-group-select v-model:value="rss.reseedGroupIds" :groups="downloaderGroups" reseed @refresh="listGroups" />
@@ -461,8 +461,9 @@
 </template>
 <script>
 import DownloaderGroupSelect from '@/components/DownloaderGroupSelect';
+import ResponsiveMultiSelect from '@/components/ResponsiveMultiSelect';
 export default {
-  components: { DownloaderGroupSelect },
+  components: { DownloaderGroupSelect, ResponsiveMultiSelect },
   data () {
     const columns = [
       {
