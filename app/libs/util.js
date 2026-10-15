@@ -106,7 +106,7 @@ exports.requestPromise = async function (_options, usePuppeteer = true) {
   if (global.trustAllCerts) {
     options.rejectUnauthorized = !global.trustAllCerts;
   }
-  const res = await require('./request-limit').run(new URL(options.url).origin, 4, () => exports._requestPromise(options));
+  const res = await require('./request-limit').request(options, () => exports._requestPromise(options));
   if (usePuppeteer && res.body && typeof res.body === 'string' && (res.body.indexOf('trk_jschal_js') !== -1 || res.body.indexOf('jschl-answer') !== -1 || (res.body.indexOf('cloudflare-static') !== -1 && res.body.indexOf('email-decode.min.js') === -1))) {
     logger.info(new url.URL(options.url).hostname, '疑似遇到 5s 盾, 启用 Puppeteer 抓取页面....');
     return await exports.requestUsePuppeteer(options);

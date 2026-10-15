@@ -104,7 +104,7 @@ class Rss {
     const context = { url, cookie: this.cookie };
     let res;
     try {
-      res = await util.requestPromise({ url, method: 'GET', encoding: null, headers: { cookie: this.cookie } });
+      res = await torrentResponse.sharedRequest(context, () => util.requestPromise({ url, method: 'GET', encoding: null, headers: { cookie: this.cookie } }));
     } catch (error) {
       throw torrentResponse.networkFailure(error, context);
     }

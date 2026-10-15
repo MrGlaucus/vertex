@@ -55,6 +55,19 @@ img[lazy=loading] {
   z-index: 1055;
 }
 
+// iOS zooms focused form controls with small text. Apply globally so controls
+// inside drawers and modals mounted under body receive the same protection.
+// Keep pinch zoom available; do not restrict the viewport's maximum scale.
+@media (max-width: 767px), (pointer: coarse) {
+  body input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='button']):not([type='submit']):not([type='reset']):not([type='hidden']),
+  body textarea,
+  body select,
+  body [contenteditable='true'],
+  body .ant-select-selection-search-input {
+    font-size: 16px !important;
+  }
+}
+
 /*
 html {
   overflow-y: scroll;

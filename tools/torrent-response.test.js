@@ -21,6 +21,35 @@ function failure (statusCode, body, type = 'text/html; charset=UTF-8') {
 }
 
 async function main () {
+  const limiter = require('../app/libs/request-limit');
+  let transport;
+  try {
+    await limiter.request({ url: context.url, timeout: 120000, proxy: false }, async () => {
+      throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+    });
+  } catch (error) { transport = response.networkFailure(error, context); }
+  assert.equal(transport.details.transportCode, 'ECONNRESET');
+  assert.equal(transport.details.timeoutMs, 120000);
+  assert.equal(transport.details.proxy, '直连');
+  assert.ok(transport.details.elapsedMs >= 0);
+  assert.match(transport.message, /请求耗时: \d+ms/);
+  let calls = 0;
+  let release;
+  const action = () => { calls++; return new Promise(resolve => { release = resolve; }); };
+  const first = response.sharedRequest(context, action);
+  const second = response.sharedRequest(context, action);
+  await Promise.resolve();
+  assert.equal(calls, 1);
+  release('torrent');
+  assert.deepEqual(await Promise.all([first, second]), ['torrent', 'torrent']);
+  const isolated = await Promise.all([
+    response.sharedRequest(context, async () => { calls++; return 'account1'; }),
+    response.sharedRequest({ ...context, cookie: 'different' }, async () => { calls++; return 'account2'; })
+  ]);
+  assert.deepEqual(isolated, ['account1', 'account2']);
+  assert.equal(calls, 3);
+  await assert.rejects(response.sharedRequest(context, async () => { throw new Error('reset'); }), /reset/);
+  assert.equal(await response.sharedRequest(context, async () => 'retry works'), 'retry works');
   const login = failure(200, html);
   assert.match(login.message, /疑似登录失效/);
   assert.match(login.message, /HTTP 200/);
