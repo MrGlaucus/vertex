@@ -19,7 +19,11 @@
           <a-switch @change="enableTask(record)" v-model:checked="record.enable" checked-children="启用" un-checked-children="禁用"/>
         </template>
         <template v-if="column.dataIndex === 'scheduleState'">
-          <a-tag :color="scheduleColor(record)">{{ scheduleLabel(record) }}</a-tag>
+          <a-space :size="4" wrap>
+            <a-tag :color="scheduleColor(record)">{{ scheduleLabel(record) }}</a-tag>
+            <a-tag v-if="record.onlyReseed" color="purple">仅辅种</a-tag>
+            <a-tag v-if="record.autoReseed" color="cyan">自动辅种</a-tag>
+          </a-space>
           <div v-if="record.scheduleState?.nextAt">下次时段：{{ record.scheduleState.nextAt }}</div>
           <div v-if="record.dailyWindowEnabled">每日 {{ record.windowStart }} 至{{ record.windowStart > record.windowEnd ? '次日 ' : ' ' }}{{ record.windowEnd }}</div>
           <div v-if="record.scheduleState?.expiresAt">截止：{{ record.scheduleState.expiresAt }}</div>

@@ -523,7 +523,18 @@ class Rss {
           continue;
         }
         if (selection.reason) {
-          if (selection.temporary) rssRetry.fail(this.id, torrent, originalClient, new Error(selection.reason));
+          if (selection.temporary) {
+            rssRetry.fail(this.id, torrent, originalClient, new Error(selection.reason));
+            const queuedRetry = rssRetry.get(this.id, torrent.hash);
+            const exhausted = queuedRetry.state === 'exhausted';
+            const note = exhausted
+              ? '自动重试已达 5 次，放弃添加: ' + selection.reason
+              : '下载器状态暂不可用，已进入自动重试队列（间隔 30 秒，最多 5 次）: ' + selection.reason;
+            await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
+              [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), exhausted ? 2 : 3, note]);
+            if (exhausted) await this._rejectTorrent(undefined, torrent, note);
+            continue;
+          }
           store.event({ rssId: this.id, hash: torrent.hash, name: torrent.name, outcome: 'rejected', reason: selection.reason });
           await util.runRecord('INSERT INTO torrents (hash, name, size, rss_id, link, record_time, record_type, record_note) values (?, ?, ?, ?, ?, ?, ?, ?)',
             [torrent.hash, torrent.name, torrent.size, this.id, torrent.link, moment().unix(), 2, '拒绝原因: ' + selection.reason]);

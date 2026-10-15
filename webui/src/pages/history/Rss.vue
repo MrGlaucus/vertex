@@ -34,7 +34,12 @@
           {{ $moment(record[column.dataIndex] * 1000).format('YYYY-MM-DD HH:mm:ss') }}
         </template>
         <template v-if="column.dataIndex === 'recordNote'">
-          <span>{{ record.recordNote.indexOf('wish') !== -1 ? '豆瓣' : record.recordNote }}</span>
+          <div v-if="record.retry" style="margin-bottom: 6px;">
+            <a-tag style="white-space: normal;" :color="record.retry.state === 'done' ? 'success' : record.retry.state === 'exhausted' ? 'error' : 'default'">{{ retryStates[record.retry.state] || record.retry.state }} · {{ record.retry.attempts }}/5</a-tag>
+            <div v-if="record.retry.nextAt" style="font-size: 12px;">计划重试：{{ $moment(record.retry.nextAt).format('MM-DD HH:mm:ss') }}；任务忙碌或定时暂停时顺延</div>
+            <div v-if="record.retry.error" style="font-size: 12px;">当前状态说明：{{ record.retry.error }}</div>
+          </div>
+          <span>{{ record.retry ? '当时记录：' : '' }}{{ record.recordNote.indexOf('wish') !== -1 ? '豆瓣' : record.recordNote }}</span>
         </template>
         <template v-if="column.title === '操作'">
           <a @click="gotoDetail(record)">打开</a>
@@ -108,6 +113,7 @@ export default {
       showSizeChanger: false
     };
     return {
+      retryStates: { waiting: '等待自动重试', done: '添加已接受 / 已确认', exhausted: '重试耗尽，已放弃', stopped: '自动重试已停止' },
       loading: true,
       pagination,
       columns,

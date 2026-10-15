@@ -533,6 +533,13 @@ class TorrentMod {
     const torrents = await util.getRecords('select id, rss_id as rssId, name, size, link, record_type as recordType, record_note as recordNote, upload, download, tracker, record_time as recordTime, add_time as addTime, delete_time as deleteTime, hash from torrents ' + where + ' order by id desc limit ? offset ?',
       params);
     const total = (await util.getRecord('select count(*) as total from torrents ' + where)).total;
+    if (options.type === 'rss') {
+      const retryQueue = require('../libs/rss-retry');
+      for (const torrent of torrents) {
+        const retry = retryQueue.get(torrent.rssId, torrent.hash);
+        if (retry) torrent.retry = { state: retry.state, attempts: retry.attempts, nextAt: retry.state === 'waiting' ? retry.nextAt : null, error: retry.error };
+      }
+    }
     return { torrents, total };
   }
 

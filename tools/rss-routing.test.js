@@ -673,7 +673,7 @@ async function main () {
       Date.now = realNow;
       global.runningRss = savedRss;
     }
-    const unavailableClient = client({ status: false, maindata: null });
+    const unavailableClient = client({ status: false, maindata: null, lastStateError: 'socket hang up' });
     let recovered = false;
     unavailableClient.ensureAvailable = async () => {
       if (recovered) {
@@ -683,22 +683,73 @@ async function main () {
     };
     global.runningClient[unavailableClient.id] = unavailableClient;
     const temporaryTorrent = { ...torrent, hash: 'temporary-unavailable' };
+    let temporaryRejections = 0;
+    let temporaryAdds = 0;
     const temporaryTask = Object.assign(Object.create(Rss.prototype), rss, {
       id: 'temporary-rss',
       clientArr: [unavailableClient.id],
       acceptRules: [],
-      _pushTorrent: async () => retryQueue.success('temporary-rss', temporaryTorrent.hash)
+      ntf: { rejectTorrent: async () => { temporaryRejections++; } },
+      _pushTorrent: async torrent => { temporaryAdds++; retryQueue.success(temporaryTask.id, torrent.hash); }
     });
     await temporaryTask.rss([temporaryTorrent]);
     const queuedTemporary = retryQueue.get(temporaryTask.id, temporaryTorrent.hash);
     assert.equal(queuedTemporary.state, 'waiting', 'temporary state rejection retains RSS payload for retry instead of losing the item');
+    assert.equal(temporaryRejections, 0, 'a transient status request failure is not notified as a permanent rejection');
+    assert.equal(records[records.length - 1][1][6], 3);
+    assert.match(records[records.length - 1][1][7], /自动重试队列.*socket hang up/);
     recovered = true;
     queuedTemporary.nextAt = Date.now() - 1;
     retryStore.put('rss-retry', queuedTemporary.id, queuedTemporary);
     global.runningRss = { [temporaryTask.id]: temporaryTask };
     try {
+      temporaryTask.processing = true;
+      await retryQueue.tick();
+      assert.equal(retryQueue.get(temporaryTask.id, temporaryTorrent.hash).attempts, 0, 'busy RSS defers a retry without losing or consuming it');
+      assert.equal(temporaryAdds, 0);
+      temporaryTask.processing = false;
       await retryQueue.tick();
       assert.equal(retryQueue.get(temporaryTask.id, temporaryTorrent.hash).state, 'done', 'recovered downloader receives the saved RSS item');
+      assert.equal(temporaryAdds, 1);
+      assert.equal(temporaryRejections, 0);
+
+      // All six members of a rule group fail status reads in the same scan. An
+      // otherwise healthy downloader outside that group must never receive them.
+      const failedClients = Array.from({ length: 6 }, () => client({ status: false, maindata: null, lastStateError: 'socket hang up', ensureAvailable: async () => false }));
+      for (const failed of failedClients) global.runningClient[failed.id] = failed;
+      temporaryTask.clientArr = [...failedClients.map(c => c.id), unavailableClient.id];
+      temporaryTask.acceptRules = [{ id: 'failed-group-rule', clientArr: failedClients.map(c => c.id) }];
+      const exhausted = { ...torrent, hash: 'status-retry-exhausted' };
+      await temporaryTask.rss([exhausted]);
+      assert.equal(temporaryRejections, 0);
+      for (let i = 1; i <= 5; i++) {
+        const entry = retryQueue.get(temporaryTask.id, exhausted.hash);
+        entry.nextAt = Date.now() - 1;
+        retryStore.put('rss-retry', entry.id, entry);
+        await retryQueue.tick();
+        assert.equal(retryQueue.get(temporaryTask.id, exhausted.hash).attempts, i);
+        assert.equal(temporaryRejections, i === 5 ? 1 : 0, 'notify abandonment only after all five retries');
+      }
+      await retryQueue.tick();
+      await temporaryTask.rss([exhausted]);
+      assert.equal(retryQueue.get(temporaryTask.id, exhausted.hash).state, 'exhausted');
+      assert.equal(temporaryRejections, 1, 'later scans never repeat the abandonment notification');
+      assert.equal(temporaryAdds, 1, 'never fall back outside the rule group');
+      assert.equal(retryStore.list('event').filter(event => event.hash === exhausted.hash && event.outcome === 'retryStarted').length, 5);
+      assert.match(records[records.length - 1][1][7], /自动重试已达 5 次/);
+
+      const TorrentMod = load('app/model/TorrentMod.js', {
+        '../libs/util': { getRecords: async () => [{ rssId: temporaryTask.id, hash: exhausted.hash }], getRecord: async () => ({ total: 1 }) },
+        '../libs/logger': logger,
+        path: {},
+        child_process: {},
+        '../libs/rss-retry': retryQueue
+      });
+      const history = await new TorrentMod().listHistory({ type: 'rss', page: 1, length: 20 });
+      assert.equal(history.torrents[0].retry.state, 'exhausted');
+      assert.equal(history.torrents[0].retry.attempts, 5);
+      assert.equal(history.torrents[0].retry.nextAt, null);
+      assert.equal(history.torrents[0].retry.torrent, undefined, 'history only exposes retry status, not the stored download request');
     } finally { global.runningRss = savedRss; }
     let finish;
     let runs = 0;
