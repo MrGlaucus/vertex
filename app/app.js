@@ -64,6 +64,13 @@ const init = function () {
   const proxySetting = JSON.parse(fs.readFileSync(path.join(__dirname, './data/setting/proxy.json')));
   global.proxy = proxySetting.proxy;
   global.domains = proxySetting.domains;
+  // Surface proxy routing at startup: environment proxies are ignored on purpose.
+  const envProxyNames = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'].filter(name => process.env[name]);
+  if (envProxyNames.length) {
+    logger.warn('检测到环境变量代理:', envProxyNames.join(', '), '— VERTEX 已忽略它们, 如需代理请在「工具 → HTTP 代理」中配置');
+  }
+  logger.info('HTTP 代理:', global.proxy ? String(global.proxy).replace(/\/\/[^/@]*@/, '//***@') : '未配置',
+    '| 代理域名:', String(global.domains || '').split('\n').map(item => item.trim()).filter(item => item).length, '条');
   global.auth = {
     username: setting.username,
     password: setting.password,

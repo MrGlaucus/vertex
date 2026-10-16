@@ -104,7 +104,7 @@ function networkFailure (error, context) {
   const code = /^[A-Z][A-Z0-9_]{1,39}$/.test(error.code || '') ? error.code : 'UNKNOWN';
   const timing = error.requestTiming || {};
   const ms = value => Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
-  const proxy = { configured: '已配置代理', direct: '直连', environment: '按环境配置（可能直连）' }[timing.proxy] || '未知';
+  const proxy = { configured: '已配置代理', direct: '直连', environment: '环境变量代理（请检查容器 HTTP_PROXY / HTTPS_PROXY）' }[timing.proxy] || '未知';
   Object.assign(result.details, { transportCode: code, elapsedMs: ms(timing.elapsedMs), queueMs: ms(timing.queueMs), timeoutMs: ms(timing.timeoutMs), proxy });
   const duration = value => value === null ? '未知' : `${value}ms`;
   result.message = `种子文件获取失败: 网络请求失败，未取得 HTTP 响应；错误码: ${code}；请求耗时: ${duration(result.details.elapsedMs)}；排队: ${duration(result.details.queueMs)}；超时配置: ${duration(result.details.timeoutMs)}；代理: ${proxy}；HTTP 未知；摘要: ${result.details.summary}`;

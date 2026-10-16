@@ -5,21 +5,38 @@ let redis = null;
 const loggerConfig = config.getLoggerConfig();
 const setting = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, '../data/setting.json'), { encoding: 'utf-8' }));
 loggerConfig.categories.default.level = setting.loggerLevel || loggerConfig.categories.default.level;
+// Every error used to fire its own unawaited read-modify-write against Redis.
+// During an error flood that produced hundreds of concurrent round-trips and
+// lost updates, which in turn starved the session store and made every API
+// call slow. Queue them and let one serialized writer drain the queue.
+const pendingErrors = [];
+let flushing = false;
+
+const flushErrors = async () => {
+  if (flushing) return;
+  flushing = true;
+  try {
+    if (!redis) redis = require('./redis');
+    const errorList = JSON.parse((await redis.get('vertex:error:list') || '[]'));
+    while (pendingErrors.length) errorList.push(pendingErrors.shift());
+    while (errorList.length > 5) {
+      errorList.shift();
+    }
+    await redis.set('vertex:error:list', JSON.stringify(errorList));
+  } catch (e) {
+    // Error reporting must never break logging itself.
+  } finally {
+    flushing = false;
+    if (pendingErrors.length) flushErrors();
+  }
+};
+
 loggerConfig.appenders.error.layout.tokens = {
   redis: (logEvent) => {
-    const f = async () => {
-      if (!redis) redis = require('./redis');
-      const errorList = JSON.parse((await redis.get('vertex:error:list') || '[]'));
-      delete logEvent.data.cert;
-      errorList.push(logEvent.data);
-      while (errorList.length > 5) {
-        errorList.shift();
-      }
-      try {
-        redis.set('vertex:error:list', JSON.stringify(errorList));
-      } catch (e) {};
-    };
-    f();
+    delete logEvent.data.cert;
+    pendingErrors.push(logEvent.data);
+    if (pendingErrors.length > 50) pendingErrors.shift();
+    flushErrors();
     return '';
   }
 };

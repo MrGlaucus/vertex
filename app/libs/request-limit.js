@@ -20,6 +20,15 @@ async function run (key, limit, action) {
 
 module.exports = { run };
 
+// The request library honours these when `proxy` is left undefined.
+const ENV_PROXY = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'];
+
+function describeProxy (options) {
+  if (options.proxy === false) return 'direct';
+  if (options.proxy) return 'configured';
+  return ENV_PROXY.some(name => process.env[name]) ? 'environment' : 'direct';
+}
+
 // Measure queue time separately: waiting for a slot is not a network timeout.
 module.exports.request = async function (options, action) {
   const queued = Date.now();
@@ -32,8 +41,7 @@ module.exports.request = async function (options, action) {
         elapsedMs: Date.now() - started,
         queueMs: started - queued,
         timeoutMs: options.timeout,
-        // request also honors environment proxies when proxy is unspecified.
-        proxy: options.proxy === undefined ? 'environment' : options.proxy ? 'configured' : 'direct'
+        proxy: describeProxy(options)
       };
       throw error;
     }

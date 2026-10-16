@@ -17,6 +17,7 @@ const redlock = require('./redlock');
 
 const logger = require('./logger');
 const scrape = require('./scrape');
+const requestPolicy = require('./request-policy');
 
 const db = new Database(path.join(__dirname, '../db/sql.db'));
 require('./brush-store').configure(db);
@@ -32,6 +33,18 @@ puppeteer.use(StealthPlugin());
 let browser;
 
 const ttl = 15000;
+
+// Wall-clock budget until the response headers arrive, measured by the request
+// library from the moment the socket is handed out. The old flat 120s meant a
+// dead site held one of the four per-origin slots for two minutes, so RSS scans
+// and retries queued up behind it. LAN downloaders answer in milliseconds and
+// are given a much tighter budget. Both are overridable from the environment.
+const WAN_TIMEOUT = requestPolicy.positiveNumber(process.env.VERTEX_REQUEST_TIMEOUT, 30000);
+const LAN_TIMEOUT = requestPolicy.positiveNumber(process.env.VERTEX_LAN_TIMEOUT, 10000);
+
+const defaultTimeout = function (target) {
+  return requestPolicy.timeoutFor(target, LAN_TIMEOUT, WAN_TIMEOUT);
+};
 
 for (const k of Object.keys(util)) {
   exports[k] = util[k];
@@ -95,13 +108,13 @@ exports.requestPromise = async function (_options, usePuppeteer = true) {
   };
   options.headers['User-Agent'] = global.userAgent || 'Vertex';
   if (!options.timeout) {
-    options.timeout = 120000;
+    options.timeout = defaultTimeout(options.url);
   }
-  if (global.proxy) {
-    const host = new URL(options.url).host;
-    if (global.domains.split('\n').indexOf(host) !== -1) {
-      options.proxy = global.proxy;
-    }
+  // Route explicitly. Never leave `proxy` undefined, otherwise the request
+  // library would pick up HTTP_PROXY / HTTPS_PROXY from the environment and
+  // send LAN downloader traffic through it.
+  if (options.proxy === undefined) {
+    options.proxy = requestPolicy.resolve(options.url, global.proxy, global.domains);
   }
   if (global.trustAllCerts) {
     options.rejectUnauthorized = !global.trustAllCerts;
@@ -114,11 +127,39 @@ exports.requestPromise = async function (_options, usePuppeteer = true) {
   return res;
 };
 
+// The shield page normally clears itself in roughly five seconds. Sleeping a
+// flat thirty seconds kept the page (and the shared browser) busy far longer
+// than needed, so every request that met a shield behaved like a timeout and
+// concurrent callers queued behind the launch lock. Poll for the challenge to
+// clear instead, with a hard ceiling.
+const SHIELD_MARKERS = ['trk_jschal_js', 'jschl-answer', 'cloudflare-static'];
+const SHIELD_SETTLE_MS = 10000;
+const SHIELD_POLL_MS = 500;
+
+const browserAlive = function () {
+  if (!browser) return false;
+  try {
+    const proc = browser.process();
+    return !!proc && proc.exitCode === null && !proc.killed;
+  } catch (ignored) {
+    return false;
+  }
+};
+
+const closeBrowserIfIdle = async function () {
+  try {
+    if ((await browser.pages()).length <= 1) {
+      logger.info('关闭 Puppeteer....');
+      await browser.close();
+    }
+  } catch (ignored) {}
+};
+
 exports.requestUsePuppeteer = async function (options) {
   const lock = await exports.redlock.lock('vertex:puppeteer', ttl);
   logger.debug('locked');
   try {
-    if (!browser || browser.process().exitCode === 0) {
+    if (!browserAlive()) {
       browser = await puppeteer.launch({
         executablePath: '/usr/bin/chromium',
         args: [
@@ -127,13 +168,13 @@ exports.requestUsePuppeteer = async function (options) {
         headless: false
       });
     }
-    lock.unlock();
-    logger.debug('unlocked');
   } catch (e) {
-    logger.error(e);
+    logger.error('Puppeteer 启动失败:\n', e);
+  } finally {
     lock.unlock();
     logger.debug('unlocked');
   }
+  if (!browserAlive()) return { body: '' };
   const page = await browser.newPage();
   try {
     await page.setViewport({ width: 800, height: 600 });
@@ -150,27 +191,28 @@ exports.requestUsePuppeteer = async function (options) {
         });
       if (cookieList.length !== 0) await page.setCookie(...cookieList);
     }
-    await page.goto(options.url, {});
-    await page.waitForTimeout(30000);
-    const body = await page.content();
-    await page.close();
-    if ((await browser.pages()).length === 1) {
-      logger.info('关闭 Puppeteer....');
-      await browser.close();
+    try {
+      await page.goto(options.url, { waitUntil: 'domcontentloaded', timeout: SHIELD_SETTLE_MS + 10000 });
+    } catch (error) {
+      logger.warn('Puppeteer 打开页面未在预期时间内完成, 尝试读取当前内容:', error.message);
+    }
+    let body = await page.content();
+    const deadline = Date.now() + SHIELD_SETTLE_MS;
+    while (Date.now() < deadline && SHIELD_MARKERS.some(marker => body.includes(marker))) {
+      await page.waitForTimeout(SHIELD_POLL_MS);
+      body = await page.content();
     }
     return {
       body
     };
   } catch (e) {
     logger.error('Puppeteer 报错:\n', e);
-    await page.close();
-    if ((await browser.pages()).length === 1) {
-      logger.info('关闭 Puppeteer....');
-      await browser.close();
-    }
     return {
       body: ''
     };
+  } finally {
+    try { await page.close(); } catch (ignored) {}
+    await closeBrowserIfIdle();
   }
 };
 
