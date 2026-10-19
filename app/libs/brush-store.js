@@ -89,8 +89,11 @@ function event (data) {
   const id = require('crypto').randomBytes(12).toString('hex');
   put('event', id, { ...data, id, time: Date.now() });
   if (database && Date.now() - lastPrune > 3600000) {
+    // The panel only renders the newest 200 events, so keeping more than a few
+    // thousand just slows every list() that parses them.
     database.prepare('DELETE FROM brush_state WHERE kind IN (?,?) AND updated_at < ?').run('event', 'event-throttle', Date.now() - 30 * 86400000);
-    database.exec('DELETE FROM brush_state WHERE kind=\'event\' AND id NOT IN (SELECT id FROM brush_state WHERE kind=\'event\' ORDER BY updated_at DESC LIMIT 10000)');
+    database.prepare('DELETE FROM brush_state WHERE kind=? AND updated_at < ?').run('rss-reject-notice', Date.now() - 7 * 86400000);
+    database.exec('DELETE FROM brush_state WHERE kind=\'event\' AND id NOT IN (SELECT id FROM brush_state WHERE kind=\'event\' ORDER BY updated_at DESC LIMIT 2000)');
     lastPrune = Date.now();
   }
 }
