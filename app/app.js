@@ -42,11 +42,35 @@ const init = function () {
   // held 425k rows and every dashboard count/sum scanned all of them while
   // blocking the event loop. Keep a rolling window instead.
   const recordKeepDays = Math.max(1, parseInt(process.env.VERTEX_RECORD_KEEP_DAYS, 10) || 30);
+  // One .torrent file is cached per added torrent and never read again once its
+  // feed entry is gone. Walk in batches so a large backlog cannot stall the loop.
+  const pruneTorrentCache = async function (keepDays) {
+    const directory = path.join(__dirname, '../torrents');
+    let names;
+    try { names = await fs.promises.readdir(directory); } catch (ignored) { return; }
+    const cutoff = Date.now() - keepDays * 86400000;
+    let removed = 0;
+    for (let index = 0; index < names.length; index += 500) {
+      await Promise.all(names.slice(index, index + 500).map(async name => {
+        if (!name.endsWith('.torrent')) return;
+        const file = path.join(directory, name);
+        try {
+          const stat = await fs.promises.stat(file);
+          if (stat.mtimeMs < cutoff) {
+            await fs.promises.unlink(file);
+            removed++;
+          }
+        } catch (ignored) {}
+      }));
+    }
+    if (removed) logger.info('种子缓存清理:', removed, '个文件');
+  };
   global.clearDatabase = cron.schedule('1 0 * * *', async () => {
     try {
       await util.runRecord('delete from torrent_flow where time < ?', [moment().unix() - 1]);
       await util.runRecord('delete from tracker_flow where time < ?', [moment().unix() - 7 * 24 * 3600]);
       await util.runRecord('delete from torrents where record_time < ?', [moment().unix() - recordKeepDays * 24 * 3600]);
+      await pruneTorrentCache(recordKeepDays);
       execSync('rm -f /tmp/Vertex-backups-*');
     } catch (e) {
       logger.error(e);

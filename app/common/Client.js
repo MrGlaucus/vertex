@@ -96,10 +96,15 @@ class Client {
     torrent.ratio3 = torrent.uploaded / torrent.totalSize;
     torrent.addedTime = moment().unix() - torrent.addedTime;
     torrent.completedTime = moment().unix() - (torrent.completedTime <= 0 ? moment().unix() : torrent.completedTime);
-    torrent.freeSpace = this.maindata.freeSpaceOnDisk;
+    // These metrics come from the downloader snapshot. The same helper also runs
+    // from RSS tasks (which have no maindata) and right after a refresh that may
+    // have failed, so an absent snapshot must leave them undefined rather than
+    // throwing once per torrent on every scan.
+    const maindata = this.maindata || {};
+    torrent.freeSpace = maindata.freeSpaceOnDisk;
     torrent.secondFromZero = moment().unix() - moment().startOf('day').unix();
-    torrent.leechingCount = this.maindata.leechingCount;
-    torrent.seedingCount = this.maindata.seedingCount;
+    torrent.leechingCount = maindata.leechingCount;
+    torrent.seedingCount = maindata.seedingCount;
     torrent.globalUploadSpeed = this.avgUploadSpeed;
     torrent.globalDownloadSpeed = this.avgDownloadSpeed;
     for (const condition of conditions) {
