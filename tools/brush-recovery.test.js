@@ -129,6 +129,51 @@ async function main () {
     assert.match(missingSource.error, /原种已不存在/);
     assert.equal(order[order.length - 1], 'Reseed');
 
+    // A relation whose peer is gone must not protect files. Trusting the job
+    // state alone left data on disk that no torrent referenced any more.
+    const stale = recovery.begin(client, 'stale-target', request, { rssId: 'rss', reseed: { sourceHash: 'gone-source', mode: 'fast', resume: false } });
+    recovery.accepted(stale);
+    const agedRelation = store.get('relation', stale.id);
+    agedRelation.createdAt = Date.now() - 3600000;
+    store.put('relation', stale.id, agedRelation);
+    assert.equal(await protection.protection(client, { hash: 'stale-target', name: 'stale', size: 100, savePath: '/data' }, true), '', 'a relation whose peer disappeared never protects files');
+    assert.equal(store.get('relation', stale.id), undefined, 'the stale relation is dropped while judging');
+
+    // A fresh relation is still settling: the peer may be mid-add, so keep the files.
+    const settling = recovery.begin(client, 'settling-target', request, { rssId: 'rss', reseed: { sourceHash: 'gone-source', mode: 'fast', resume: false } });
+    recovery.accepted(settling);
+    assert.match(await protection.protection(client, { hash: 'settling-target', name: 'settling', size: 100, savePath: '/data' }, true), /待确认/);
+
+    // Relations only get cleaned when this app deletes a torrent, so pairs
+    // removed directly in the downloader have to be reconciled away.
+    const livePair = recovery.begin(client, 'pair-target', request, { rssId: 'rss', reseed: { sourceHash: 'source', mode: 'fast', resume: false } });
+    recovery.accepted(livePair);
+    const deadPair = recovery.begin(client, 'dead-target', request, { rssId: 'rss', reseed: { sourceHash: 'dead-source', mode: 'fast', resume: false } });
+    recovery.accepted(deadPair);
+    for (const id of [livePair.id, deadPair.id]) {
+      const relation = store.get('relation', id);
+      relation.createdAt = Date.now() - 3600000;
+      store.put('relation', id, relation);
+    }
+    assert.equal(protection.reconcile({ ...client, maindata: { torrents: [] } }), 0, 'an empty snapshot never drops relations');
+    assert.equal(protection.reconcile(client), 1, 'only the pair with both sides gone is dropped');
+    assert.notEqual(store.get('relation', livePair.id), undefined, 'a pair that still has a live side is kept');
+    assert.equal(store.get('relation', deadPair.id), undefined, 'a pair with both sides gone is dropped');
+    // Rows written before the ref column existed are filled on startup, so the
+    // indexed lookup sees the same relations as the old full scan.
+    database.prepare('UPDATE brush_state SET ref = NULL WHERE kind = \'relation\'').run();
+    store.configure(database);
+    assert.equal(store.listByRef('relation', client.id).some(r => r.targetHash === 'pair-target'), true, 'legacy relation rows are backfilled');
+
+    // A job of a disabled feed is never reconciled, so it has to time out.
+    const aged = recovery.begin(client, 'aged-target', request, { rssId: 'rss' });
+    recovery.accepted(aged);
+    aged.createdAt = Date.now() - 25 * 3600000;
+    recovery.save(aged);
+    recovery.prune();
+    assert.equal(store.get('job', aged.id).state, 'stopped', 'a job that never finishes converges after a day');
+    assert.match(store.get('job', aged.id).error, /自动收敛/);
+
     const tagFailure = recovery.begin(client, 'tag-fail', request, { rssId: 'rss', reseed: { sourceHash: 'source', mode: 'fast', resume: false } });
     recovery.accepted(tagFailure);
     torrents.set('tag-fail', { hash: 'tag-fail', size: 100, completed: 100, state: 'pausedUP' });

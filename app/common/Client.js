@@ -319,7 +319,13 @@ class Client {
       this.capacityUpdatedAt = Date.now();
       capacity.snapshot(this);
       for (const entry of store.list('deletion').filter(e => e.clientId === this.id)) {
-        if (!maindata.torrents.some(t => t.hash === entry.hash)) store.remove('deletion', this.id + ':' + entry.hash);
+        if (!maindata.torrents.some(t => t.hash === entry.hash) || Date.now() - (entry.time || 0) > 2 * 3600000) store.remove('deletion', this.id + ':' + entry.hash);
+      }
+      try {
+        const dropped = deletion.reconcile(this);
+        if (dropped) logger.debug('下载器', this.alias, '清理失效辅种关系', dropped, '条');
+      } catch (error) {
+        logger.error('清理辅种关系失败:', error.message);
       }
       this.avgDownloadSpeed = maindata.downloadSpeed * 0.1 + this.avgDownloadSpeed * 0.9;
       this.avgUploadSpeed = maindata.uploadSpeed * 0.1 + this.avgUploadSpeed * 0.9;
@@ -519,10 +525,27 @@ class Client {
           this.pausedTorrentHashes.push(torrent.hash);
         } else {
           store.put('deletion', this.id + ':' + torrent.hash, { clientId: this.id, hash: torrent.hash, time: Date.now() });
-          const response = await this.client.deleteTorrent(this.clientUrl, this.cookie, torrent.hash, isDeleteFiles);
-          if (response && response.statusCode !== 200 && response.statusCode !== 204) throw new Error('删除请求失败: ' + response.statusCode);
-          if (response && response.body && typeof response.body === 'object' && response.body.error) throw new Error('下载器拒绝删除');
-          if (this._client.type === 'Transmission' && response && response.body && (typeof response.body === 'string' ? JSON.parse(response.body) : response.body).result !== 'success') throw new Error('Transmission 拒绝删除');
+          let response;
+          try {
+            response = await this.client.deleteTorrent(this.clientUrl, this.cookie, torrent.hash, isDeleteFiles);
+          } catch (error) {
+            // The marker blocks reseeding from this torrent, so a request that
+            // never landed must not leave it behind.
+            store.remove('deletion', this.id + ':' + torrent.hash);
+            throw error;
+          }
+          if (response && response.statusCode !== 200 && response.statusCode !== 204) {
+            store.remove('deletion', this.id + ':' + torrent.hash);
+            throw new Error('删除请求失败: ' + response.statusCode);
+          }
+          if (response && response.body && typeof response.body === 'object' && response.body.error) {
+            store.remove('deletion', this.id + ':' + torrent.hash);
+            throw new Error('下载器拒绝删除');
+          }
+          if (this._client.type === 'Transmission' && response && response.body && (typeof response.body === 'string' ? JSON.parse(response.body) : response.body).result !== 'success') {
+            store.remove('deletion', this.id + ':' + torrent.hash);
+            throw new Error('Transmission 拒绝删除');
+          }
           deletion.removed(this, torrent.hash);
         }
         store.event({ clientId: this.id, hash: torrent.hash, name: torrent.name, outcome: rule.pause || rule.limitSpeed ? 'controlled' : 'deleted', reason: rule.alias + (protectedBy ? ': ' + protectedBy : ''), deleteFiles: isDeleteFiles });

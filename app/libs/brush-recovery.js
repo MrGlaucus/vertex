@@ -10,7 +10,13 @@ let lastPrune = 0;
 // the store is scanned on every RSS pass. Keep a day, drop the rest hourly.
 const PRUNE_INTERVAL = 3600000;
 const PRUNE_KEEP = 24 * 3600000;
+// A job that never reaches a terminal state keeps protecting shared files
+// forever, because the delete guard only asks whether the job is finished.
+// Jobs of a disabled or deleted feed are never reconciled, so they have to time
+// out on their own. Verification gives up at six hours, so a day is generous.
+const STALE_JOB = 24 * 3600000;
 const pruneStates = ['done', 'stopped', 'verificationFailed', 'failed'];
+const staleStates = ['accepted', 'verifying', 'tags', 'sending', 'pending', 'uncertain'];
 const terminal = ['done', 'stopped', 'verificationFailed'];
 const jobId = (clientId, hash) => clientId + ':' + String(hash).toLowerCase();
 const safeError = error => String(error.message || error).replace(/https?:\/\/\S+/g, '[地址已隐藏]').slice(0, 500);
@@ -163,11 +169,20 @@ async function recordHistory (job) {
 function prune () {
   const cutoff = Date.now() - PRUNE_KEEP;
   let jobs = 0;
+  let converged = 0;
   for (const job of store.list('job')) {
-    if (!pruneStates.includes(job.state)) continue;
-    if ((job.updatedAt || 0) > cutoff) continue;
-    store.remove('job', job.id);
-    jobs++;
+    if (pruneStates.includes(job.state)) {
+      if ((job.updatedAt || 0) > cutoff) continue;
+      store.remove('job', job.id);
+      jobs++;
+      continue;
+    }
+    if (!staleStates.includes(job.state)) continue;
+    if (Date.now() - (job.createdAt || job.updatedAt || 0) < STALE_JOB) continue;
+    job.state = 'stopped';
+    job.error = '超过 24 小时未完成，已自动收敛；不再保留共享数据';
+    save(job);
+    converged++;
   }
   let retries = 0;
   for (const entry of store.list('rss-retry')) {
@@ -175,7 +190,7 @@ function prune () {
     store.remove('rss-retry', entry.id);
     retries++;
   }
-  if (jobs || retries) logger.info('刷流记录清理: 终态任务', jobs, '条, 已结束重试', retries, '条');
+  if (jobs || retries || converged) logger.info('刷流记录清理: 终态任务', jobs, '条, 已结束重试', retries, '条, 超时收敛', converged, '条');
 }
 
 async function tick () {
@@ -276,4 +291,4 @@ async function performAction (id, operation) {
   return job;
 }
 
-module.exports = { begin, accepted, failed, lookup, completed, reconcile, checkRetry, tick, forFeed, action, jobId, save, safeError, recordHistory, setHistory: adapter => { history = adapter; }, end: id => active.delete(id) };
+module.exports = { begin, accepted, failed, lookup, completed, reconcile, checkRetry, tick, prune, forFeed, action, jobId, save, safeError, recordHistory, setHistory: adapter => { history = adapter; }, end: id => active.delete(id) };

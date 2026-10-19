@@ -2,30 +2,83 @@ const store = require('./brush-store');
 const recovery = require('./brush-recovery');
 const { overlaps } = require('./reseed-files');
 
-async function protection (client, torrent, live = false) {
-  for (const relation of store.list('relation').filter(r => r.clientId === client.id && [r.sourceHash, r.targetHash].includes(torrent.hash))) {
-    const other = relation.sourceHash === torrent.hash ? relation.targetHash : relation.sourceHash;
-    const job = store.get('job', recovery.jobId(client.id, relation.targetHash));
-    if (job && !['done', 'stopped', 'verificationFailed', 'failed'].includes(job.state)) return '辅种或标签确认尚未完成，保留共享数据';
+// A relation younger than this may belong to a torrent that is still being
+// added, so a missing peer is not proof that the pair is gone.
+const SETTLE = 15 * 60000;
+const terminal = ['done', 'stopped', 'verificationFailed', 'failed'];
+const lower = value => String(value || '').toLowerCase();
+
+function relationsOf (client, hash) {
+  return store.listByRef('relation', client.id).filter(r => lower(r.sourceHash) === hash || lower(r.targetHash) === hash);
+}
+
+// Whether the peer of a relation still exists in the downloader. Live lookups
+// are authoritative; a failed lookup falls back to the last snapshot instead of
+// assuming the peer is still there, because keeping files has no way back.
+async function peerExists (client, other, live) {
+  if (live) {
     try {
-      const found = live ? await recovery.lookup(client, other) : (client.maindata.torrents || []).find(t => t.hash === other);
-      if (found) return '文件仍被关联原种或辅种使用';
+      return !!(await recovery.lookup(client, other));
     } catch (error) {
-      return '无法实时确认关联种子状态，保留共享数据';
+      // fall through to the snapshot
     }
   }
-  for (const other of client.maindata.torrents || []) {
-    if (other.hash === torrent.hash) continue;
+  return (client.maindata.torrents || []).some(t => lower(t.hash) === lower(other));
+}
+
+async function protection (client, torrent, live = false) {
+  const hash = lower(torrent.hash);
+  const snapshot = client.maindata.torrents || [];
+  // An empty snapshot means the downloader is restarting or offline. Judging
+  // shared files from it would delete data that is still seeding.
+  if (!snapshot.length) return '下载器种子列表为空，暂不删除文件';
+  let uncertain = '';
+  for (const relation of relationsOf(client, hash)) {
+    const other = lower(relation.sourceHash) === hash ? relation.targetHash : relation.sourceHash;
+    if (!await peerExists(client, other, live)) {
+      // The peer is gone, so nothing shares these files. A relation that
+      // outlived its torrent used to protect files forever; drop it and let the
+      // remaining checks decide.
+      if (Date.now() - (relation.createdAt || 0) > SETTLE) store.remove('relation', recovery.jobId(client.id, relation.targetHash));
+      else uncertain = '关联种子状态待确认，保留共享数据';
+      continue;
+    }
+    const job = store.get('job', recovery.jobId(client.id, relation.targetHash));
+    if (job && !terminal.includes(job.state)) return '辅种或标签确认尚未完成，保留共享数据';
+    return '文件仍被关联原种或辅种使用';
+  }
+  for (const other of snapshot) {
+    if (lower(other.hash) === hash) continue;
     if ((other.name === torrent.name && other.size === torrent.size && overlaps(other.savePath, torrent.savePath)) || overlaps(other.originProp && other.originProp.content_path, torrent.originProp && torrent.originProp.content_path)) return '下载器中存在共用文件的其他种子';
   }
-  return '';
+  return uncertain;
 }
 
 function removed (client, hash) {
-  for (const relation of store.list('relation').filter(r => r.clientId === client.id && [r.sourceHash, r.targetHash].includes(hash))) {
-    const other = relation.sourceHash === hash ? relation.targetHash : relation.sourceHash;
-    if (!(client.maindata.torrents || []).some(t => t.hash === other)) store.remove('relation', recovery.jobId(client.id, relation.targetHash));
+  const target = lower(hash);
+  for (const relation of relationsOf(client, target)) {
+    const other = lower(relation.sourceHash) === target ? relation.targetHash : relation.sourceHash;
+    if (!(client.maindata.torrents || []).some(t => lower(t.hash) === lower(other))) store.remove('relation', recovery.jobId(client.id, relation.targetHash));
   }
 }
 
-module.exports = { protection, removed };
+// Relations are only cleaned when this app deletes a torrent. Anything removed
+// from the downloader directly (ratio limit, seed time limit, manual delete in
+// the WebUI) leaves the pair behind, and a stale pair keeps protecting files
+// that no torrent references any more. Reconcile against the live snapshot.
+function reconcile (client) {
+  // An empty or missing snapshot means the downloader is restarting or offline,
+  // not that every torrent disappeared.
+  if (!client.status || !Array.isArray(client.maindata.torrents) || !client.maindata.torrents.length) return 0;
+  const live = new Set(client.maindata.torrents.map(t => lower(t.hash)));
+  let dropped = 0;
+  for (const relation of store.listByRef('relation', client.id)) {
+    if (Date.now() - (relation.createdAt || 0) < SETTLE) continue;
+    if (live.has(lower(relation.sourceHash)) || live.has(lower(relation.targetHash))) continue;
+    store.remove('relation', recovery.jobId(client.id, relation.targetHash));
+    dropped++;
+  }
+  return dropped;
+}
+
+module.exports = { protection, removed, reconcile };

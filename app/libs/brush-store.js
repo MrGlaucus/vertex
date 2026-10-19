@@ -6,30 +6,39 @@ let lastPrune = 0;
 // RSS looks a job up by feed hash on every scan. Deriving an indexed `ref`
 // column keeps that lookup off the full-kind scan, which used to read and parse
 // every stored job once per torrent per minute.
+// Relations are read by downloader on every delete, so they use the same column
+// with the client id as key instead of scanning the whole kind.
 function refOf (kind, data) {
-  if (kind !== 'job' || !data || !data.rssId || !data.feedHash) return null;
-  return data.rssId + ':' + String(data.feedHash).toLowerCase();
+  if (!data) return null;
+  if (kind === 'job') {
+    if (!data.rssId || !data.feedHash) return null;
+    return data.rssId + ':' + String(data.feedHash).toLowerCase();
+  }
+  if (kind === 'relation') return data.clientId || null;
+  return null;
 }
 
 // Older rows predate the ref column. Fill them once so lookups stay index-only.
 function backfill (db) {
   let rows;
   try {
-    rows = db.prepare('SELECT id, data FROM brush_state WHERE kind = \'job\' AND ref IS NULL').all();
+    rows = db.prepare('SELECT id, kind, data FROM brush_state WHERE kind IN (\'job\', \'relation\') AND ref IS NULL').all();
   } catch (ignored) {
     return;
   }
   if (!rows.length) return;
   const update = db.prepare('UPDATE brush_state SET ref = ? WHERE kind = ? AND id = ?');
-  const run = db.transaction(list => {
+  const apply = list => {
     for (const row of list) {
       let data;
       try { data = JSON.parse(row.data); } catch (ignored) { continue; }
-      const ref = refOf('job', data);
-      if (ref) update.run(ref, 'job', row.id);
+      const ref = refOf(row.kind, data);
+      if (ref) update.run(ref, row.kind, row.id);
     }
-  });
-  run(rows);
+  };
+  // The local test runtime's SQLite shim has no transaction helper.
+  if (typeof db.transaction === 'function') db.transaction(apply)(rows);
+  else apply(rows);
 }
 
 function configure (db) {
@@ -72,6 +81,21 @@ function getByRef (kind, ref) {
 function list (kind) {
   if (database) return database.prepare('SELECT data FROM brush_state WHERE kind=? ORDER BY updated_at DESC').all(kind).map(row => JSON.parse(row.data));
   return [...memory.entries()].filter(([key]) => key.startsWith(kind + ':')).map(([, json]) => JSON.parse(json));
+}
+
+// Every row of one kind sharing a ref value. Relations are grouped by client id,
+// so a delete only parses the rows of the downloader it touches.
+function listByRef (kind, ref) {
+  if (!ref) return [];
+  if (database) return database.prepare('SELECT data FROM brush_state WHERE kind=? AND ref=?').all(kind, ref).map(row => JSON.parse(row.data));
+  const result = [];
+  for (const [key, json] of memory.entries()) {
+    if (key.indexOf(kind + ':') !== 0) continue;
+    let data;
+    try { data = JSON.parse(json); } catch (ignored) { continue; }
+    if (refOf(kind, data) === ref) result.push(data);
+  }
+  return result;
 }
 
 function remove (kind, id) {
@@ -118,4 +142,4 @@ function transaction (action) {
   }
 }
 
-module.exports = { configure, put, get, getByRef, list, remove, event, transaction };
+module.exports = { configure, put, get, getByRef, list, listByRef, remove, event, transaction };
