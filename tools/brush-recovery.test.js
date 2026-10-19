@@ -94,6 +94,15 @@ async function main () {
     assert.equal(store.get('job', job.id).state, 'done');
     assert.match(await protection.protection(client, torrents.get('source'), true), /关联/);
 
+    // RSS resolves a job per torrent per minute, so the lookup must go through
+    // the indexed ref column instead of scanning and parsing every stored job.
+    assert.equal(recovery.forFeed('rss', 'feed').id, job.id, 'forFeed resolves a job by rss id and feed hash');
+    assert.equal(recovery.forFeed('rss', 'FEED').id, job.id, 'feed hash matching stays case-insensitive');
+    assert.equal(recovery.forFeed('rss', 'other'), undefined, 'an unknown feed hash resolves to nothing');
+    assert.equal(recovery.forFeed('', 'feed'), undefined, 'a job without an rss id is never matched');
+    assert.equal(store.getByRef('job', 'rss:feed').id, job.id, 'the ref column is populated on write');
+    assert.equal(store.getByRef('job', 'rss:feed').state, 'done', 'the ref lookup returns the stored payload');
+
     const absent = recovery.begin(client, 'absent', request, { rssId: 'rss' });
     recovery.failed(absent, new Error('timeout'), false);
     absent.nextAt = Date.now() - 1;

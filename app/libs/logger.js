@@ -3,7 +3,12 @@ const config = require('./config');
 let redis = null;
 
 const loggerConfig = config.getLoggerConfig();
-const setting = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, '../data/setting.json'), { encoding: 'utf-8' }));
+// The settings file is absent in unit tests and on a first run before the panel
+// writes it, so fall back to the configured defaults instead of throwing.
+let setting = {};
+try {
+  setting = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, '../data/setting.json'), { encoding: 'utf-8' }));
+} catch (ignored) {}
 loggerConfig.categories.default.level = setting.loggerLevel || loggerConfig.categories.default.level;
 // Every error used to fire its own unawaited read-modify-write against Redis.
 // During an error flood that produced hundreds of concurrent round-trips and

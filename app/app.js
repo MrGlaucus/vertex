@@ -38,10 +38,15 @@ const initPush = function () {
 };
 
 const init = function () {
+  // Record history used to grow without bound: after nine months `torrents`
+  // held 425k rows and every dashboard count/sum scanned all of them while
+  // blocking the event loop. Keep a rolling window instead.
+  const recordKeepDays = Math.max(1, parseInt(process.env.VERTEX_RECORD_KEEP_DAYS, 10) || 30);
   global.clearDatabase = cron.schedule('1 0 * * *', async () => {
     try {
       await util.runRecord('delete from torrent_flow where time < ?', [moment().unix() - 1]);
       await util.runRecord('delete from tracker_flow where time < ?', [moment().unix() - 7 * 24 * 3600]);
+      await util.runRecord('delete from torrents where record_time < ?', [moment().unix() - recordKeepDays * 24 * 3600]);
       execSync('rm -f /tmp/Vertex-backups-*');
     } catch (e) {
       logger.error(e);

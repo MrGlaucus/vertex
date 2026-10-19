@@ -1,9 +1,16 @@
 const store = require('./brush-store');
 const capacity = require('./capacity');
+const logger = require('./logger');
 const active = new Set();
 const recovering = new Set();
 let ticking = false;
 let history;
+let lastPrune = 0;
+// Terminal jobs are only useful while their feed entry can still resurface, and
+// the store is scanned on every RSS pass. Keep a day, drop the rest hourly.
+const PRUNE_INTERVAL = 3600000;
+const PRUNE_KEEP = 24 * 3600000;
+const pruneStates = ['done', 'stopped', 'verificationFailed', 'failed'];
 const terminal = ['done', 'stopped', 'verificationFailed'];
 const jobId = (clientId, hash) => clientId + ':' + String(hash).toLowerCase();
 const safeError = error => String(error.message || error).replace(/https?:\/\/\S+/g, '[地址已隐藏]').slice(0, 500);
@@ -153,10 +160,32 @@ async function recordHistory (job) {
   else await history.runRecord('INSERT INTO torrents (hash,name,size,rss_id,category,link,record_time,add_time,record_type,record_note) VALUES (?,?,?,?,?,?,?,?,?,?)', [job.hash, job.name, job.request.size || 0, job.rssId || '', job.category || '', job.link || '', Math.floor(Date.now() / 1000), Math.floor(job.createdAt / 1000), recordType, resultNote]);
 }
 
+function prune () {
+  const cutoff = Date.now() - PRUNE_KEEP;
+  let jobs = 0;
+  for (const job of store.list('job')) {
+    if (!pruneStates.includes(job.state)) continue;
+    if ((job.updatedAt || 0) > cutoff) continue;
+    store.remove('job', job.id);
+    jobs++;
+  }
+  let retries = 0;
+  for (const entry of store.list('rss-retry')) {
+    if (entry.state === 'waiting') continue;
+    store.remove('rss-retry', entry.id);
+    retries++;
+  }
+  if (jobs || retries) logger.info('刷流记录清理: 终态任务', jobs, '条, 已结束重试', retries, '条');
+}
+
 async function tick () {
   if (ticking) return;
   ticking = true;
   try {
+    if (Date.now() - lastPrune > PRUNE_INTERVAL) {
+      lastPrune = Date.now();
+      try { prune(); } catch (error) { logger.error('刷流记录清理失败:', error.message); }
+    }
     const canReconcile = job => !job.rssId || global.runningRss[job.rssId] || store.get('rss-schedule', job.rssId);
     const jobs = store.list('job').filter(job => !terminal.includes(job.state) && (job.state !== 'failed' || !job.checkedFailure) && job.nextAt <= Date.now() && canReconcile(job) && global.runningClient[job.clientId]?.status).sort((a, b) => a.nextAt - b.nextAt).slice(0, 5);
     for (const job of jobs) {
@@ -184,7 +213,10 @@ async function tick () {
 }
 
 function forFeed (rssId, hash) {
-  return store.list('job').find(job => job.rssId === rssId && String(job.feedHash).toLowerCase() === String(hash).toLowerCase());
+  if (!rssId) return undefined;
+  // Indexed lookup. The previous full-kind scan read and parsed every stored job
+  // once per torrent per minute, which saturated the event loop at ~10k jobs.
+  return store.getByRef('job', rssId + ':' + String(hash).toLowerCase());
 }
 
 async function action (id, operation) {

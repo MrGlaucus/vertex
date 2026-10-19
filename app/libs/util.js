@@ -21,6 +21,7 @@ const requestPolicy = require('./request-policy');
 
 const db = new Database(path.join(__dirname, '../db/sql.db'));
 require('./brush-store').configure(db);
+require('./schema').ensure(db);
 exports.backupDatabase = filename => db.backup(filename);
 exports.checkDatabase = filename => {
   const backup = new Database(filename, { readonly: true, fileMustExist: true });
