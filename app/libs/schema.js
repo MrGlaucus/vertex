@@ -10,7 +10,7 @@ const INDEXES = [
   ['index_t_sum', 'CREATE INDEX IF NOT EXISTS index_t_sum ON torrents(upload, download)'],
   ['index_t_rss_cover', 'CREATE INDEX IF NOT EXISTS index_t_rss_cover ON torrents(rss_id, upload, download)'],
   ['index_t_tracker_cover', 'CREATE INDEX IF NOT EXISTS index_t_tracker_cover ON torrents(tracker, upload, download)'],
-  ['index_tf_hash_time', 'CREATE INDEX IF NOT EXISTS index_tf_hash_time ON torrent_flow(hash, time)'],
+  ['index_tf_hash_time', 'CREATE INDEX IF NOT EXISTS index_tf_hash_time ON torrent_flow(hash, time)']
 ];
 
 const logger = require('./logger');

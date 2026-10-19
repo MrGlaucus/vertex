@@ -15,7 +15,7 @@ function refOf (kind, data) {
 function backfill (db) {
   let rows;
   try {
-    rows = db.prepare("SELECT id, data FROM brush_state WHERE kind = 'job' AND ref IS NULL").all();
+    rows = db.prepare('SELECT id, data FROM brush_state WHERE kind = \'job\' AND ref IS NULL').all();
   } catch (ignored) {
     return;
   }
