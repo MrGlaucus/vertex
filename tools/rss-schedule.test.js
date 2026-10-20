@@ -67,7 +67,7 @@ async function main () {
     let stoppedJobs = 0;
     const mocks = {
       '../libs/rss': { getTorrents: async () => { fetches++; return [{ hash: 'item', name: 'item', size: 1 }]; } },
-      '../libs/util': { listPush: () => [], listRssRule: () => [], calSize: () => 0, getRecord: async () => null },
+      '../libs/util': { listPush: () => [], listRssRule: () => [], calSize: () => 0, getRecord: async () => null, runRecord: async () => ({}) },
       '../libs/logger': { info () {}, error () {} },
       '../libs/redis': {},
       'node-cron': { schedule: () => ({ stop: () => { stoppedJobs++; } }) },
@@ -75,7 +75,7 @@ async function main () {
       fs: fakeFs,
       path,
       moment,
-      './Push': class {},
+      './Push': class { async rejectTorrent () {} async addTorrent () {} },
       '../libs/rss-routing': { orderedRules: () => [], refresh: async () => {}, select: () => ({ client: { id: 'client' } }) },
       '../libs/auto-reseed': { waiting: () => [], attempt: async () => false },
       '../libs/brush-recovery': recovery,
@@ -94,12 +94,15 @@ async function main () {
     task.fetchErrorAt = 2;
     await task.rss();
     assert.equal(fetches, 0, 'no fetching outside the window');
-    assert.equal(task.lastRssTime, null, 'scheduled downtime clears previous fetch baseline');
+    assert.equal(task.lastRssTime, 0, 'scheduled downtime clears previous fetch baseline');
     assert.equal(task.fetchErrorAt, null);
     clock = moment('2026-10-13T23:00').valueOf();
     await task.rss();
     assert.equal(fetches, 1);
-    assert.equal(adds, 1, 'first fetch after planned downtime is not rejected as a long outage');
+    assert.equal(adds, 0, 'the first fetch after planned downtime is judged like any other long sleep');
+    clock = moment('2026-10-13T23:00:05').valueOf();
+    await task.rss();
+    assert.equal(adds, 1, 'the next fetch inside the window adds normally');
 
     const queued = { hash: 'queued', name: 'queued', size: 1 };
     retry.fail(task.id, queued, undefined, new Error('timeout'));

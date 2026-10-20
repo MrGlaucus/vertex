@@ -21,7 +21,10 @@ class Rss {
     this._rss = rss;
     this.id = rss.id;
     this.maxSleepTime = rss.maxSleepTime;
-    this.lastRssTime = null;
+    // 0 means "this instance has never fetched". The original behaviour treats
+    // that as a long sleep, so a restart or a re-enabled task rejects its first
+    // batch instead of pulling in whatever the feed has piled up.
+    this.lastRssTime = 0;
     this.fetchErrorAt = null;
     this.alias = rss.alias;
     this.urls = rss.rssUrls;
@@ -197,8 +200,9 @@ class Rss {
     if (this.stopped) return false;
     const status = schedule.state(this._rss);
     if (!status.allowed) {
-      // Planned downtime is not an RSS fetch outage.
-      this.lastRssTime = null;
+      // A paused window is a gap as well: when it reopens, the first batch is
+      // judged like any other long sleep instead of being added wholesale.
+      this.lastRssTime = 0;
       this.fetchErrorAt = null;
     }
     if (status.status === 'expired' && !this._rss.dryrun) {
@@ -430,14 +434,17 @@ class Rss {
         throw error;
       }
       const fetchedAt = moment().unix();
-      const previous = this.lastRssTime ?? this.fetchErrorAt;
-      // A new instance has no previous fetch. Normal restarts are not RSS outages.
-      if (previous !== null && previous !== undefined && fetchedAt - previous > +this.maxSleepTime) {
+      const previous = this.lastRssTime || this.fetchErrorAt;
+      // No previous fetch counts as a long sleep. Treating it as a normal fetch
+      // let a task that had been off for a day pull the whole feed backlog in,
+      // because nothing else filters by publish time.
+      if (!previous || fetchedAt - previous > +this.maxSleepTime) {
         const formatTime = time => moment.unix(time).format('YYYY-MM-DD HH:mm:ss Z');
-        const lastSuccess = this.lastRssTime === null || this.lastRssTime === undefined
-          ? `无（启动后尚未成功）；首次获取失败: ${formatTime(this.fetchErrorAt)}`
-          : formatTime(this.lastRssTime);
-        sleepReason = `拒绝原因: 最长休眠时间（仅限制普通下载）；上次成功获取: ${lastSuccess}；本次成功获取: ${formatTime(fetchedAt)}；实际间隔: ${fetchedAt - previous} 秒；配置阈值: ${+this.maxSleepTime} 秒`;
+        let lastSuccess = '无（实例启动后首次获取）';
+        if (this.lastRssTime) lastSuccess = formatTime(this.lastRssTime);
+        else if (this.fetchErrorAt) lastSuccess = `无（启动后尚未成功）；首次获取失败: ${formatTime(this.fetchErrorAt)}`;
+        const interval = previous ? `；实际间隔: ${fetchedAt - previous} 秒` : '';
+        sleepReason = `拒绝原因: 最长休眠时间（仅限制普通下载）；上次成功获取: ${lastSuccess}；本次成功获取: ${formatTime(fetchedAt)}${interval}；配置阈值: ${+this.maxSleepTime} 秒`;
       }
       this.lastRssTime = fetchedAt;
       this.fetchErrorAt = null;

@@ -328,18 +328,18 @@ async function main () {
     const lifecycle = Object.assign(Object.create(Rss.prototype), rss, {
       id: 'restart-rss',
       acceptRules: [],
-      lastRssTime: null,
+      lastRssTime: 0,
       fetchErrorAt: null,
       _pushTorrent: async () => { lifecycleAdds++; }
     });
     try {
       currentUnix = 10000;
       await lifecycle.rss();
-      assert.equal(lifecycleAdds, 1, 'normal restart first success is not rejected as a long sleep');
+      assert.equal(lifecycleAdds, 0, 'a fresh instance has no previous fetch, so its first batch is rejected as a long sleep');
       assert.equal(lifecycle.lastRssTime, 10000);
       currentUnix += 30;
       await lifecycle.rss();
-      assert.equal(lifecycleAdds, 2);
+      assert.equal(lifecycleAdds, 1);
       fetchFailure = new Error('RSS temporarily unavailable');
       currentUnix += 10;
       await assert.rejects(lifecycle.rss(), /RSS temporarily unavailable/);
@@ -350,7 +350,7 @@ async function main () {
       assert.equal(lifecycle.fetchErrorAt, 10040, 'repeated failures retain the initial failure time');
       fetchFailure = null;
       await lifecycle.rss();
-      assert.equal(lifecycleAdds, 2, 'long RSS outage still rejects the first recovered batch');
+      assert.equal(lifecycleAdds, 1, 'long RSS outage still rejects the first recovered batch');
       const outageNote = records[records.length - 1][1][7];
       assert.match(outageNote, /上次成功获取: \d{4}-\d{2}-\d{2}/);
       assert.match(outageNote, /本次成功获取: \d{4}-\d{2}-\d{2}/);
@@ -358,12 +358,12 @@ async function main () {
       assert.equal(lifecycle.lastRssTime, currentUnix);
       currentUnix += 30;
       await lifecycle.rss();
-      assert.equal(lifecycleAdds, 3, 'the next healthy batch is processed normally');
+      assert.equal(lifecycleAdds, 2, 'the next healthy batch is processed normally');
       const successAt = lifecycle.lastRssTime;
       currentUnix += 300;
       await lifecycle.rss([torrent], true);
       assert.equal(lifecycle.lastRssTime, successAt, 'retry processing cannot mask a failing RSS feed');
-      lifecycle.lastRssTime = null;
+      lifecycle.lastRssTime = 0;
       lifecycle.fetchErrorAt = null;
       fetchFailure = new Error('failed during startup');
       await assert.rejects(lifecycle.rss(), /failed during startup/);
