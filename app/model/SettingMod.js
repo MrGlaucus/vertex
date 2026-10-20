@@ -3,6 +3,7 @@ const path = require('path');
 const moment = require('moment');
 const util = require('../libs/util');
 const redis = require('../libs/redis');
+const recordRollup = require('../libs/record-rollup');
 const Push = require('../common/Push');
 const otp = require('../libs/otp');
 
@@ -118,6 +119,8 @@ class SettingMod {
   };
 
   async getRunInfo () {
+    // Lifetime totals = folded history + whatever the rolling window still holds.
+    const total = recordRollup.get('total');
     const { uploaded, downloaded } = (await util.getRecord('select sum(upload) as uploaded, sum(download) as downloaded from torrents'));
     const addCountToday = (await util.getRecord('select count(*) as addCount from torrents where record_type = 1 and record_time > ?', [moment().startOf('day').unix()])).addCount;
     const rejectCountToday = (await util.getRecord('select count(*) as rejectCount from torrents where record_type = 2 and record_time > ?', [moment().startOf('day').unix()])).rejectCount;
@@ -150,13 +153,13 @@ class SettingMod {
     await redis.set('vertex:error:list', '[]');
     return {
       dashboardContent: global.dashboardContent,
-      uploaded: uploaded || 0,
-      downloaded: downloaded || 0,
+      uploaded: total.upload + (uploaded || 0),
+      downloaded: total.download + (downloaded || 0),
       uploadedToday: uploadedToday || 0,
       downloadedToday: downloadedToday || 0,
-      addCount,
-      rejectCount,
-      deleteCount,
+      addCount: total.addCount + addCount,
+      rejectCount: total.rejectCount + rejectCount,
+      deleteCount: total.deleteCount + deleteCount,
       addCountToday,
       rejectCountToday,
       deleteCountToday,

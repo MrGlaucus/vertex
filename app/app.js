@@ -22,6 +22,7 @@ const IRC = require('./common/IRC');
 const sites = require('./libs/site');
 const logger = require('./libs/logger');
 const util = require('./libs/util');
+const recordRollup = require('./libs/record-rollup');
 const config = require('./libs/config');
 const { execSync } = require('child_process');
 logger.use(app);
@@ -69,7 +70,10 @@ const init = function () {
     try {
       await util.runRecord('delete from torrent_flow where time < ?', [moment().unix() - 1]);
       await util.runRecord('delete from tracker_flow where time < ?', [moment().unix() - 7 * 24 * 3600]);
-      await util.runRecord('delete from torrents where record_time < ?', [moment().unix() - recordKeepDays * 24 * 3600]);
+      // Fold the expiring rows into the lifetime totals before dropping them,
+      // otherwise the dashboard counters fall every single night.
+      const folded = recordRollup.fold(moment().unix() - recordKeepDays * 24 * 3600);
+      if (folded) logger.info('历史记录清理:', folded, '条已并入累计数据');
       await pruneTorrentCache(recordKeepDays);
       execSync('rm -f /tmp/Vertex-backups-*');
     } catch (e) {

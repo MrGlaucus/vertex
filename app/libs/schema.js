@@ -13,9 +13,31 @@ const INDEXES = [
   ['index_tf_hash_time', 'CREATE INDEX IF NOT EXISTS index_tf_hash_time ON torrent_flow(hash, time)']
 ];
 
+// Lifetime totals live outside the rolling window. `torrents` only keeps recent
+// rows, so a dashboard total summed from it alone shrinks every time the window
+// slides. Anything pruned is folded in here first, which keeps the counters
+// monotonic while the detail table stays small.
+const TABLES = [
+  `CREATE TABLE IF NOT EXISTS record_total (
+    key TEXT NOT NULL PRIMARY KEY,
+    upload INTEGER NOT NULL DEFAULT 0,
+    download INTEGER NOT NULL DEFAULT 0,
+    add_count INTEGER NOT NULL DEFAULT 0,
+    reject_count INTEGER NOT NULL DEFAULT 0,
+    delete_count INTEGER NOT NULL DEFAULT 0
+  )`
+];
+
 const logger = require('./logger');
 
 exports.ensure = function (db) {
+  for (const sql of TABLES) {
+    try {
+      db.exec(sql);
+    } catch (error) {
+      logger.error('创建累计表失败:', error.message);
+    }
+  }
   for (const [name, sql] of INDEXES) {
     try {
       db.exec(sql);
