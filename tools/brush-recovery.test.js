@@ -129,20 +129,21 @@ async function main () {
     assert.match(missingSource.error, /原种已不存在/);
     assert.equal(order[order.length - 1], 'Reseed');
 
-    // A relation whose peer is gone must not protect files. Trusting the job
-    // state alone left data on disk that no torrent referenced any more.
-    const stale = recovery.begin(client, 'stale-target', request, { rssId: 'rss', reseed: { sourceHash: 'gone-source', mode: 'fast', resume: false } });
-    recovery.accepted(stale);
-    const agedRelation = store.get('relation', stale.id);
-    agedRelation.createdAt = Date.now() - 3600000;
-    store.put('relation', stale.id, agedRelation);
-    assert.equal(await protection.protection(client, { hash: 'stale-target', name: 'stale', size: 100, savePath: '/data' }, true), '', 'a relation whose peer disappeared never protects files');
-    assert.equal(store.get('relation', stale.id), undefined, 'the stale relation is dropped while judging');
+    // A peer that no longer exists must not protect files just because the
+    // relation is new. A reseed that fails verification is deleted minutes
+    // after it was created, and nothing revisits the pair afterwards.
+    const abandoned = recovery.begin(client, 'abandoned-target', request, { rssId: 'rss', reseed: { sourceHash: 'gone-source', mode: 'fast', resume: false } });
+    recovery.accepted(abandoned);
+    assert.equal(await protection.protection(client, { hash: 'abandoned-target', name: 'abandoned', size: 100, savePath: '/data' }, true), '', 'a peer with neither a torrent nor a pending job never protects files');
+    assert.equal(store.get('relation', abandoned.id), undefined, 'the dead relation is dropped while judging');
 
-    // A fresh relation is still settling: the peer may be mid-add, so keep the files.
-    const settling = recovery.begin(client, 'settling-target', request, { rssId: 'rss', reseed: { sourceHash: 'gone-source', mode: 'fast', resume: false } });
+    // A peer that is still being added has no torrent yet, so its job state is
+    // the only evidence that the files are about to be shared.
+    const pendingPeer = recovery.begin(client, 'pending-peer', request, { rssId: 'rss' });
+    recovery.accepted(pendingPeer);
+    const settling = recovery.begin(client, 'settling-target', request, { rssId: 'rss', reseed: { sourceHash: 'pending-peer', mode: 'fast', resume: false } });
     recovery.accepted(settling);
-    assert.match(await protection.protection(client, { hash: 'settling-target', name: 'settling', size: 100, savePath: '/data' }, true), /待确认/);
+    assert.match(await protection.protection(client, { hash: 'settling-target', name: 'settling', size: 100, savePath: '/data' }, true), /正在添加/, 'a peer that is still being added keeps the files');
 
     // Relations only get cleaned when this app deletes a torrent, so pairs
     // removed directly in the downloader have to be reconciled away.

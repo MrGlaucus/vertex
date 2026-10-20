@@ -516,6 +516,9 @@ class Client {
     return requestLimit.run('data:' + this.id, 1, async () => {
       const protectedBy = await deletion.protection(this, torrent, true);
       const isDeleteFiles = !rule.onlyDeleteTorrent && !protectedBy;
+      // The reason only lived in the event table, which keeps 2000 rows, so by
+      // the time a leftover file is noticed the evidence is already gone.
+      if (!isDeleteFiles) logger.info('仅删种:', this.alias, '|', torrent.name, '| 规则:', rule.alias, '| 原因:', protectedBy || '规则设置为仅删种');
       try {
         if (rule.limitSpeed) {
           await this.setSpeedLimit(torrent.hash, 'download', rule.limitSpeed);

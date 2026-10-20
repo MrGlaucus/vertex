@@ -2,8 +2,8 @@ const store = require('./brush-store');
 const recovery = require('./brush-recovery');
 const { overlaps } = require('./reseed-files');
 
-// A relation younger than this may belong to a torrent that is still being
-// added, so a missing peer is not proof that the pair is gone.
+// Reconcile only drops pairs once they have had time to settle, so a torrent
+// that is still being added is never mistaken for a removed one.
 const SETTLE = 15 * 60000;
 const terminal = ['done', 'stopped', 'verificationFailed', 'failed'];
 const lower = value => String(value || '').toLowerCase();
@@ -36,11 +36,16 @@ async function protection (client, torrent, live = false) {
   for (const relation of relationsOf(client, hash)) {
     const other = lower(relation.sourceHash) === hash ? relation.targetHash : relation.sourceHash;
     if (!await peerExists(client, other, live)) {
-      // The peer is gone, so nothing shares these files. A relation that
-      // outlived its torrent used to protect files forever; drop it and let the
-      // remaining checks decide.
-      if (Date.now() - (relation.createdAt || 0) > SETTLE) store.remove('relation', recovery.jobId(client.id, relation.targetHash));
-      else uncertain = '关联种子状态待确认，保留共享数据';
+      // A peer that is still being added has no torrent yet, so its job state is
+      // the only evidence the files are about to be shared. Relation age is not:
+      // a reseed that fails verification gets deleted minutes after it was
+      // created, and nothing ever revisits the pair afterwards.
+      const peerJob = store.get('job', recovery.jobId(client.id, other));
+      if (peerJob && !terminal.includes(peerJob.state)) {
+        uncertain = '关联种子正在添加，保留共享数据';
+        continue;
+      }
+      store.remove('relation', recovery.jobId(client.id, relation.targetHash));
       continue;
     }
     const job = store.get('job', recovery.jobId(client.id, relation.targetHash));
