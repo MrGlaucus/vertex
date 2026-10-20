@@ -13,17 +13,21 @@ function relationsOf (client, hash) {
 }
 
 // Whether the peer of a relation still exists in the downloader. Live lookups
-// are authoritative; a failed lookup falls back to the last snapshot instead of
-// assuming the peer is still there, because keeping files has no way back.
+// are authoritative. A lookup that fails (downloader offline, timeout, stale
+// cookie) says nothing about the peer, so it answers null and the caller keeps
+// the files: deleting shared data cannot be undone, while a file that survives
+// one round is still there to be judged again.
 async function peerExists (client, other, live) {
   if (live) {
     try {
       return !!(await recovery.lookup(client, other));
     } catch (error) {
-      // fall through to the snapshot
+      return null;
     }
   }
-  return (client.maindata.torrents || []).some(t => lower(t.hash) === lower(other));
+  const snapshot = client.maindata.torrents || [];
+  if (!snapshot.length) return null;
+  return snapshot.some(t => lower(t.hash) === lower(other));
 }
 
 async function protection (client, torrent, live = false) {
@@ -35,7 +39,11 @@ async function protection (client, torrent, live = false) {
   let uncertain = '';
   for (const relation of relationsOf(client, hash)) {
     const other = lower(relation.sourceHash) === hash ? relation.targetHash : relation.sourceHash;
-    if (!await peerExists(client, other, live)) {
+    const exists = await peerExists(client, other, live);
+    // The peer could not be read, so there is no evidence either way. Keep the
+    // files; the next delete round will ask again.
+    if (exists === null) return '无法实时确认关联种子状态，保留共享数据';
+    if (!exists) {
       // A peer that is still being added has no torrent yet, so its job state is
       // the only evidence the files are about to be shared. Relation age is not:
       // a reseed that fails verification gets deleted minutes after it was

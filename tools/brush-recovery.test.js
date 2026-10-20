@@ -137,6 +137,24 @@ async function main () {
     assert.equal(await protection.protection(client, { hash: 'abandoned-target', name: 'abandoned', size: 100, savePath: '/data' }, true), '', 'a peer with neither a torrent nor a pending job never protects files');
     assert.equal(store.get('relation', abandoned.id), undefined, 'the dead relation is dropped while judging');
 
+    // A lookup that fails says nothing about the peer. Treating it as "gone"
+    // deletes shared files on a timeout, so the files have to stay instead.
+    const unreadable = recovery.begin(client, 'unreadable-target', request, { rssId: 'rss', reseed: { sourceHash: 'source', mode: 'fast', resume: false } });
+    recovery.accepted(unreadable);
+    const reachable = client.client.getTorrent;
+    const savedTorrents = client.maindata.torrents;
+    client.client.getTorrent = async () => { throw new Error('downloader offline'); };
+    // The snapshot must not contain the peer either, otherwise falling back to
+    // it would satisfy this assertion for the wrong reason.
+    client.maindata.torrents = savedTorrents.filter(t => t.hash !== 'source');
+    try {
+      assert.match(await protection.protection(client, { hash: 'unreadable-target', name: 'unreadable', size: 100, savePath: '/data' }, true), /无法实时确认/, 'a failed lookup keeps the files');
+    } finally {
+      client.client.getTorrent = reachable;
+      client.maindata.torrents = savedTorrents;
+    }
+    assert.notEqual(store.get('relation', unreadable.id), undefined, 'a failed lookup never drops the relation');
+
     // A peer that is still being added has no torrent yet, so its job state is
     // the only evidence that the files are about to be shared.
     const pendingPeer = recovery.begin(client, 'pending-peer', request, { rssId: 'rss' });
