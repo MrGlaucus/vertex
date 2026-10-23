@@ -15,7 +15,7 @@ async function refresh (task, clients = {}) {
   }));
 }
 
-function select (task, torrent, rule = {}, clients = {}) {
+function select (task, torrent, rule = {}, clients = {}, excluded = null) {
   const group = (!rule.client || (rule.clientGroupIds || []).length) && groups.restricted(rule);
   // Legacy single-downloader overrides remain usable without task membership.
   const ids = groups.ruleClients(task, rule);
@@ -29,6 +29,10 @@ function select (task, torrent, rule = {}, clients = {}) {
       if ((task.maxClientUploadSpeed > 0 && client.avgUploadSpeed >= task.maxClientUploadSpeed) || (client.maxUploadSpeed > 0 && upload >= client.maxUploadSpeed)) reason = '达到上传速度上限';
       if ((task.maxClientDownloadSpeed > 0 && client.avgDownloadSpeed >= task.maxClientDownloadSpeed) || (client.maxDownloadSpeed > 0 && download >= client.maxDownloadSpeed)) reason = '达到下载速度上限';
     }
+    // Files that are already there download nothing, which is exactly what an
+    // avoid-reseed task is trying to prevent. Capacity problems still win the
+    // slot because they are the harder blocker.
+    if (!reason && excluded && excluded.has(id)) reason = '已存在相同内容的种子（避开辅种）';
     return { id, alias: client ? client.alias : id, reason, duplicate: capacity.duplicate(client, torrent.hash), temporary: !!reason && capacity.isUnavailable(client) };
   });
   const available = candidates.filter(c => !c.reason).map(c => clients[c.id]);

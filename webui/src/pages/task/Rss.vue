@@ -23,6 +23,7 @@
             <a-tag :color="scheduleColor(record)">{{ scheduleLabel(record) }}</a-tag>
             <a-tag v-if="record.onlyReseed" color="purple">仅辅种</a-tag>
             <a-tag v-if="record.autoReseed" color="cyan">自动辅种</a-tag>
+            <a-tag v-if="record.avoidReseed" color="orange">避开辅种</a-tag>
           </a-space>
           <div v-if="record.scheduleState?.nextAt">下次时段：{{ record.scheduleState.nextAt }}</div>
           <div v-if="record.dailyWindowEnabled">每日 {{ record.windowStart }} 至{{ record.windowStart > record.windowEnd ? '次日 ' : ' ' }}{{ record.windowEnd }}</div>
@@ -301,11 +302,14 @@
           :rules="[{ required: true, message: '${label}不可为空! ' }]">
           <a-input size="small" v-model:value="rss.maxSleepTime"/>
         </a-form-item>
-        <a-form-item label="自动辅种" name="autoReseed" extra="优先在持有完整数据的 qBittorrent 上添加，普通下载容量限制不会拦截辅种。">
-          <a-checkbox v-model:checked="rss.autoReseed">启用自动辅种</a-checkbox>
+        <a-form-item label="自动辅种" name="autoReseed" extra="优先在持有完整数据的 qBittorrent 上添加，普通下载容量限制不会拦截辅种。与避开辅种互斥。">
+          <a-checkbox v-model:checked="rss.autoReseed" @change="onReseedChange">启用自动辅种</a-checkbox>
         </a-form-item>
-        <a-form-item label="仅辅种" name="onlyReseed" extra="没有匹配到已有完整数据时不进行普通下载。">
-          <a-checkbox v-model:checked="rss.onlyReseed">仅辅种</a-checkbox>
+        <a-form-item label="仅辅种" name="onlyReseed" extra="没有匹配到已有完整数据时不进行普通下载。与避开辅种互斥。">
+          <a-checkbox v-model:checked="rss.onlyReseed" @change="onReseedChange">仅辅种</a-checkbox>
+        </a-form-item>
+        <a-form-item label="避开辅种" name="avoidReseed" extra="添加前检查目标下载器，已有相同内容的种子就换一台，全部命中则拒绝本轮添加。与辅种互斥，开启后自动关闭「跳过大小相同种子」。适用于按下载量折算上传量的站点，避免种子复用已有文件导致 0 下载量。">
+          <a-checkbox v-model:checked="rss.avoidReseed" @change="onAvoidReseedChange">启用避开辅种</a-checkbox>
         </a-form-item>
         <a-form-item v-if="rss.autoReseed || rss.onlyReseed" label="辅种下载器" name="reseedClients">
           <responsive-multi-select v-model:value="rss.reseedClients" :options="downloaders.filter(c => c.type === 'qBittorrent').map(client => ({ value: client.id, label: client.alias }))" placeholder="选择辅种下载器" />
@@ -560,6 +564,7 @@ export default {
         reseedWaitMinutes: 120,
         ruleOrder: 'configured',
         onlyReseed: false,
+        avoidReseed: false,
         maxSleepTime: 600,
         skipSameTorrent: true,
         pushTorrentFile: true,
@@ -592,6 +597,15 @@ export default {
     },
     scheduleColor (record) {
       return { running: 'success', outside: 'orange', expired: 'error', disabled: 'default' }[record.scheduleState?.status] || 'default';
+    },
+    onReseedChange (event) {
+      if (event.target.checked) this.rss.avoidReseed = false;
+    },
+    onAvoidReseedChange (event) {
+      if (!event.target.checked) return;
+      this.rss.autoReseed = false;
+      this.rss.onlyReseed = false;
+      this.rss.skipSameTorrent = false;
     },
     isMobile () {
       if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {

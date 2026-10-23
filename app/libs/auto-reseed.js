@@ -1,6 +1,7 @@
 const fs = require('fs');
 const bencode = require('bencode');
 const files = require('./reseed-files');
+const match = require('./reseed-match');
 const recovery = require('./brush-recovery');
 const store = require('./brush-store');
 const groups = require('./downloader-groups');
@@ -20,11 +21,8 @@ async function attempt (task, torrent, rule = {}) {
     for (const { client, source } of candidates) {
       if (oldJob && oldJob.clientId !== client.id) continue;
       if (source.hash.toLowerCase() === metadata.hash.toLowerCase()) continue;
-      const current = await recovery.lookup(client, source.hash);
-      if (!recovery.completed(current) || !current.savePath || +current.size !== size) continue;
-      if (mode === 'compatible') {
-        if (current.name !== info.name.toString()) continue;
-      } else if (!files.sameFiles(expected, await client.getFiles(source.hash))) continue;
+      const current = await match.resolve({ client, source, info, expected, size, mode });
+      if (!current) continue;
       if (task.stopped || (task.canRun && !task.canRun())) throw require('./rss-schedule').pausedError();
       if (task._rss.reseedRespectRules && (task.scrapeFree || task.scrapeHr)) {
         const util = require('./util');

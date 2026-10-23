@@ -210,6 +210,23 @@ async function main () {
     assert.throws(() => manifest({ name: Buffer.from('../bad'), length: 100 }), /路径/);
     const metadata = path.join(temporary, 'reseed.torrent');
     fs.writeFileSync(metadata, require('bencode').encode({ info: { name: 'folder', files: [{ path: ['one.mkv'], length: 100 }] } }));
+
+    // Avoid reseed drops exactly the downloader that already holds the files, so
+    // the torrent lands somewhere it will really download. Both directions use
+    // the same match, which is why this reuses the reseed fixtures above.
+    const avoid = require('../app/libs/avoid-reseed');
+    const other = { id: 'other', alias: 'qB2', status: true, _client: { type: 'qBittorrent' }, maindata: { torrents: [], leechingCount: 0, freeSpaceOnDisk: 10000 } };
+    const savedRunning = global.runningClient;
+    global.runningClient = { persist: client, other };
+    torrents.set('avoid-src', { hash: 'avoid-src', size: 100, completed: 100, progress: 1, name: 'folder', savePath: '/data' });
+    const avoidTorrents = client.maindata.torrents;
+    client.maindata.torrents = [...avoidTorrents, torrents.get('avoid-src')];
+    const avoidTask = { id: 'avoid-rss', clientArr: ['persist', 'other'], _rss: { reseedMode: 'compatible' }, _downloadTorrent: async () => ({ filepath: metadata, hash: 'avoid-hash' }) };
+    const avoidTorrent = { hash: 'avoid-hash', name: 'folder', size: 100 };
+    assert.deepEqual([...await avoid.scan(avoidTask, avoidTorrent, {})], ['persist'], 'the downloader holding the files is excluded');
+    assert.equal(await avoid.scan({ ...avoidTask, clientArr: ['other'] }, avoidTorrent, {}), null, 'no same-size torrent means no metadata download at all');
+    client.maindata.torrents = avoidTorrents;
+    global.runningClient = savedRunning;
     const autoReseed = require('../app/libs/auto-reseed');
     const task = { id: 'match-test', autoReseed: true, onlyReseed: true, clientArr: ['persist'], reseedClients: ['persist'], addCount: 0, _rss: { reseedMode: 'safe', reseedRespectRules: true, reseedWaitMinutes: 10 }, _downloadTorrent: async () => ({ filepath: metadata, hash: 'new-match' }) };
     const feed = { hash: 'new-feed', size: 100, name: 'folder' };

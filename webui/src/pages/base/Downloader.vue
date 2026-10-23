@@ -15,7 +15,7 @@
       </template>
       <template #bodyCell="{ column, record }">
         <template v-if="column.dataIndex === 'enable'">
-          <a-switch @change="enableDownloader(record)" :disabled="record.used" v-model:checked="record.enable" checked-children="启用" un-checked-children="禁用"/>
+          <a-switch @change="enableDownloader(record)" :disabled="record.enableLocked" v-model:checked="record.enable" checked-children="启用" un-checked-children="禁用" :title="record.enableLocked ? '仍有运行中的任务引用此下载器，先关闭那些任务再切换' : ''"/>
         </template>
         <template v-if="column.dataIndex === 'autoDelete'">
           <a-tag color="success" v-if="record.autoDelete">启用</a-tag>
@@ -89,7 +89,7 @@
           name="enable"
           extra="选择是否启用下载器"
           :rules="[{ required: true, message: '${label}不可为空! ' }]">
-          <a-checkbox :disabled="downloader.used" v-model:checked="downloader.enable">启用</a-checkbox>
+          <a-checkbox :disabled="downloader.enableLocked" v-model:checked="downloader.enable">启用</a-checkbox>
         </a-form-item>
         <a-form-item
           label="下载器类型"
@@ -372,6 +372,7 @@ export default {
         password: '',
         port: '',
         enable: true,
+        enableLocked: false,
         pushNotify: false,
         pushMonitor: false,
         spaceAlarm: false,
@@ -434,6 +435,8 @@ export default {
     cloneClick (row) {
       this.downloader = { ...row, capacityMode: row.capacityMode || 'strict', deleteRules: [...row.deleteRules] };
       this.downloader.id = null;
+      // The clone is new, so no task points at it yet.
+      this.downloader.enableLocked = false;
       this.downloader.alias = this.downloader.alias + '-克隆';
     },
     async deleteDownloader (row) {

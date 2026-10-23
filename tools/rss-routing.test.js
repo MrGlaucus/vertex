@@ -48,6 +48,12 @@ async function main () {
   clients[b.id] = b;
   assert.equal(routing.select(task, { size: 100 }, { client: b.id }, clients).client, b, 'legacy override');
   assert.equal(routing.select(task, { size: 100 }, { clientArr: [b.id] }, clients).client, undefined, 'new groups require task membership');
+  // Avoid reseed hands the excluded ids in, so a machine that already holds the
+  // files never wins the slot no matter how attractive it looks.
+  const both = { ...task, clientArr: [a.id, b.id] };
+  assert.equal(routing.select(both, { size: 100 }, {}, clients, new Set([a.id])).client, b, 'an excluded downloader is skipped');
+  assert.match(routing.select(task, { size: 100 }, {}, clients, new Set([a.id])).reason, /避开辅种/, 'excluding every candidate rejects the torrent');
+  assert.equal(routing.select(task, { size: 100 }, {}, clients, null).client, a, 'no exclusion set leaves routing untouched');
   assert.deepEqual(routing.orderedRules([{ id: 'a' }, { id: 'b', priority: 0 }, { id: 'c', priority: 2 }], ['b', 'a', 'c']).map(r => r.id), ['c', 'b', 'a']);
   const sorting = { ...task, clientArr: [a.id, b.id], clientSortBy: 'freeSpaceOnDisk' };
   b.maindata.freeSpaceOnDisk = 2000;
@@ -267,9 +273,38 @@ async function main () {
   assert.equal(ruleMod.normalize({ client: 'legacy', clientArr: [] }).client, undefined);
   assert.throws(() => ruleMod.normalize({ clientArr: 'invalid' }), /数组/);
   assert.throws(() => ruleMod.normalize({ priority: 'invalid' }), /数字/);
-  const ClientMod = load('app/model/ClientMod.js', { fs: {}, path: {}, '../common/Client': Client, '../libs/capacity': capacity, '../libs/util': {}, '../libs/downloader-groups': require('../app/libs/downloader-groups') });
+  const schedule = require('../app/libs/rss-schedule');
+  const clientMocks = { fs: {}, path: {}, '../common/Client': Client, '../libs/capacity': capacity, '../libs/util': {}, '../libs/downloader-groups': require('../app/libs/downloader-groups'), '../libs/rss-schedule': schedule };
+  const ClientMod = load('app/model/ClientMod.js', clientMocks);
   assert.throws(() => new ClientMod().add({ capacityMode: 'invalid' }), /未知空间计算模式/);
   assert.throws(() => new ClientMod().modify({ capacityMode: 'invalid' }), /未知空间计算模式/);
+
+  // A task that is switched off never pushes a torrent, so it must not lock the
+  // downloader switch even though it still blocks deletion.
+  const rssTasks = [{ id: 'on', enable: true, clientArr: ['c1'] }, { id: 'off', enable: false, clientArr: ['c1'] }];
+  const lockMod = load('app/model/ClientMod.js', {
+    ...clientMocks,
+    '../libs/util': { listRss: () => rssTasks, listDouban: () => [], listClient: () => [{ id: 'c1', enable: true }], listWatch: () => [] },
+    '../libs/downloader-groups': { list: () => [] }
+  });
+  const savedRunningClient = global.runningClient;
+  const savedIgnore = global.ignoreDependCheck;
+  global.runningClient = {};
+  global.ignoreDependCheck = false;
+  let [entry] = new lockMod().list();
+  assert.equal(entry.enableLocked, true, 'a running task locks the downloader switch');
+  assert.equal(entry.used, true, 'a running task blocks deletion');
+  rssTasks[0].enable = false;
+  [entry] = new lockMod().list();
+  assert.equal(entry.enableLocked, false, 'a switched-off task leaves the switch free');
+  assert.equal(entry.used, true, 'a switched-off task still blocks deletion');
+  rssTasks[0].enable = true;
+  rssTasks[0].expireEnabled = true;
+  rssTasks[0].expireAt = '2000-01-01T00:00:00';
+  [entry] = new lockMod().list();
+  assert.equal(entry.enableLocked, false, 'an expired task leaves the switch free');
+  global.runningClient = savedRunningClient;
+  global.ignoreDependCheck = savedIgnore;
 
   let records = [];
   let fetchedSettings;
@@ -277,6 +312,7 @@ async function main () {
   let fetchFailure;
   let emptyFeed = false;
   const autoReseed = { attempt: async () => false, waiting: () => [] };
+  const avoidReseed = { scan: async () => null };
   const torrent = { name: 'example', size: 100, hash: 'rss-test', link: 'link' };
   const Rss = load('app/common/Rss.js', {
     '../libs/rss': { getTorrents: async (url, settings, options) => { fetchedSettings = settings; fetchedOptions = options; if (fetchFailure) throw fetchFailure; return emptyFeed ? [] : [{ ...torrent }]; } },
@@ -291,6 +327,7 @@ async function main () {
     './Push': {},
     '../libs/rss-routing': routing,
     '../libs/auto-reseed': autoReseed,
+    '../libs/avoid-reseed': avoidReseed,
     '../libs/rss-retry': require('../app/libs/rss-retry'),
     '../libs/rss-schedule': require('../app/libs/rss-schedule'),
     '../libs/downloader-groups': require('../app/libs/downloader-groups'),

@@ -12,6 +12,10 @@ function validate (rssSet, preview = false) {
   schedule.validate(rssSet, preview);
   require('../libs/rss-xml-replace').compile(rssSet);
   if (rssSet.reseedMode && !['safe', 'fast', 'compatible'].includes(rssSet.reseedMode)) throw new Error('未知辅种策略');
+  if (rssSet.avoidReseed && (rssSet.autoReseed || rssSet.onlyReseed)) throw new Error('避开辅种与自动辅种、仅辅种不能同时开启');
+  // Avoid reseed replaces the blunt same-size skip. Keeping both would reject
+  // torrents that already passed the stricter content check.
+  if (rssSet.avoidReseed) rssSet.skipSameTorrent = false;
   if (rssSet.ruleOrder && !['legacy', 'configured'].includes(rssSet.ruleOrder)) throw new Error('未知规则顺序');
   if (rssSet.reseedWaitMinutes !== undefined && (!Number.isFinite(Number(rssSet.reseedWaitMinutes)) || +rssSet.reseedWaitMinutes < 0 || +rssSet.reseedWaitMinutes > 1440)) throw new Error('辅种等待时间应在 0 到 1440 分钟之间');
 }
@@ -68,6 +72,7 @@ class RssMod {
       }
       rss.reseedMode = rss.reseedMode || 'compatible';
       rss.ruleOrder = rss.ruleOrder || 'legacy';
+      rss.avoidReseed = !!rss.avoidReseed;
       rss.clientArr = rss.clientArr || [];
       if (!rss.reseedClients && !(rss.clientGroupIds || []).length && !(rss.reseedGroupIds || []).length) rss.reseedClients = rss.clientArr || [rss.client];
       rss.acceptRules = rss.acceptRules || [];

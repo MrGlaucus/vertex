@@ -3,6 +3,7 @@ const path = require('path');
 const Client = require('../common/Client');
 const capacity = require('../libs/capacity');
 const groups = require('../libs/downloader-groups');
+const schedule = require('../libs/rss-schedule');
 
 const util = require('../libs/util');
 function validate (options) {
@@ -47,13 +48,30 @@ class ClientMod {
     const doubanList = util.listDouban();
     const clientList = util.listClient();
     const watchList = util.listWatch();
+    // A task that is switched off or has already expired never pushes another
+    // torrent, so it must not lock the downloader switch. A daily-window pause
+    // still counts: the task resumes by itself and would then find the
+    // downloader gone.
+    const activeRss = rssList.filter(rss => {
+      const status = schedule.state(rss).status;
+      return status !== 'disabled' && status !== 'expired';
+    });
+    const activeGroupIds = new Set(activeRss.flatMap(rss => rss.clientGroupIds || []));
+    const groupList = groups.list();
+    const activeGroups = groupList.filter(group => activeGroupIds.has(group.id));
     for (const client of clientList) {
       client.capacityMode = client.capacityMode || 'strict';
       client.used = !global.ignoreDependCheck && (rssList.some(item => (item.clientArr || [item.client]).indexOf(client.id) !== -1) ||
-        groups.list().some(group => group.clientIds.includes(client.id)) ||
+        groupList.some(group => group.clientIds.includes(client.id)) ||
         rssList.some(item => (item.reseedClients || []).indexOf(client.id) !== -1) ||
         doubanList.some(item => item.client === client.id) ||
         watchList.some(item => item.downloader === client.id));
+      // Deleting stays blocked by any reference at all; only the switch relaxes.
+      client.enableLocked = !global.ignoreDependCheck && (activeRss.some(item => (item.clientArr || [item.client]).indexOf(client.id) !== -1) ||
+        activeGroups.some(group => group.clientIds.includes(client.id)) ||
+        activeRss.some(item => (item.reseedClients || []).indexOf(client.id) !== -1) ||
+        doubanList.some(item => item.enable !== false && item.client === client.id) ||
+        watchList.some(item => item.enable !== false && item.downloader === client.id));
       client.status = !!(client.enable && global.runningClient[client.id] && global.runningClient[client.id].status && global.runningClient[client.id].maindata);
       if (client.status) {
         client.allTimeUpload = global.runningClient[client.id].maindata.allTimeUpload;

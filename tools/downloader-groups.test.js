@@ -74,6 +74,9 @@ async function main () {
       bencode,
       './downloader-groups': groups,
       './reseed-files': require('../app/libs/reseed-files'),
+      // The real match is covered by brush-recovery.test.js; here only the
+      // membership rules matter, so any surviving source counts as a match.
+      './reseed-match': { resolve: async ({ source }) => source || null },
       './brush-store': { get: () => undefined, list: () => [], remove () {}, event () {} },
       './brush-recovery': { completed: value => !!value, forFeed: () => undefined, lookup: async c => c.maindata.torrents[0] }
     });

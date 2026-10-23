@@ -78,6 +78,7 @@ async function main () {
       './Push': class { async rejectTorrent () {} async addTorrent () {} },
       '../libs/rss-routing': { orderedRules: () => [], refresh: async () => {}, select: () => ({ client: { id: 'client' } }) },
       '../libs/auto-reseed': { waiting: () => [], attempt: async () => false },
+      '../libs/avoid-reseed': { scan: async () => null },
       '../libs/brush-recovery': recovery,
       '../libs/brush-store': store,
       '../libs/rss-retry': retry,

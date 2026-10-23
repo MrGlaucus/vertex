@@ -10,6 +10,7 @@ const moment = require('moment');
 const Push = require('./Push');
 const routing = require('../libs/rss-routing');
 const autoReseed = require('../libs/auto-reseed');
+const avoidReseed = require('../libs/avoid-reseed');
 const recovery = require('../libs/brush-recovery');
 const store = require('../libs/brush-store');
 const rssRetry = require('../libs/rss-retry');
@@ -32,9 +33,12 @@ class Rss {
     this.clientSortBy = rss.clientSortBy;
     this.autoReseed = rss.autoReseed;
     this.onlyReseed = rss.onlyReseed;
+    this.avoidReseed = rss.avoidReseed;
     this.reseedClients = rss.reseedClients;
     this.pushMessage = rss.pushMessage;
-    this.skipSameTorrent = rss.skipSameTorrent;
+    // Avoid reseed already proved the target has no reusable files, so the
+    // blunt same-size skip would only reject what it just approved.
+    this.skipSameTorrent = rss.avoidReseed ? false : rss.skipSameTorrent;
     this.scrapeFree = rss.scrapeFree;
     this.scrapeHr = rss.scrapeHr;
     this.sleepTime = rss.sleepTime;
@@ -121,6 +125,20 @@ class Rss {
       name
     };
   };
+
+  // Downloaders that already hold this torrent's files. A failure here is
+  // logged and ignored: a metadata fetch that fails must not stall the whole
+  // feed, and an addition that downloads nothing costs less than a missed one.
+  async _avoided (torrent, rule) {
+    if (!this.avoidReseed) return null;
+    try {
+      return await avoidReseed.scan(this, torrent, rule || {});
+    } catch (error) {
+      logger.error(this.alias, '避开辅种检查失败:', error.message);
+      store.event({ rssId: this.id, hash: torrent.hash, name: torrent.name, outcome: 'avoidError', reason: recovery.safeError(error) });
+      return null;
+    }
+  }
 
   _fitConditions (_torrent, conditions) {
     let fit = true;
@@ -508,9 +526,14 @@ class Rss {
           continue;
         }
         const fitRule = this.acceptRules.find(rule => this._fitRule(rule, torrent));
-        const selection = fitRule || !this.acceptRules.length
-          ? routing.select(this, torrent, fitRule, global.runningClient)
-          : { reason: '不符合所有选择规则' };
+        let selection;
+        if (fitRule || !this.acceptRules.length) {
+          // Only spend the metadata download when routing will actually run.
+          const excluded = await this._avoided(torrent, fitRule);
+          selection = routing.select(this, torrent, fitRule, global.runningClient, excluded);
+        } else {
+          selection = { reason: '不符合所有选择规则' };
+        }
         if (retry && oldJob?.reseed) continue;
         const originalClient = oldJob?.clientId || queued?.clientId;
         if (retry && originalClient && selection.client && selection.client.id !== originalClient) {
@@ -577,6 +600,12 @@ class Rss {
       torrent.candidates = selection.candidates;
       torrent.downloader = selection.client ? selection.client.alias : '';
       torrent.status = selection.reason || '可分配（仅检查规则与当前容量，未执行抓取、辅种或添加）';
+      // Avoid reseed needs the torrent metadata, which a preview never fetches.
+      // Say so instead of promising an assignment the run may refuse.
+      if (this.avoidReseed && selection.client) {
+        const sameSize = (selection.client.maindata.torrents || []).some(item => +item.size === +torrent.size);
+        if (sameSize) torrent.status += '；该下载器有同大小种子，添加前会抓取种子确认是否避开';
+      }
     }
     return torrents;
   }
